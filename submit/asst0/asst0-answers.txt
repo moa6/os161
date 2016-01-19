@@ -1,0 +1,142 @@
+OUTPUT:
+
+jharvard@appliance (~/os161/root): sys161 kernel
+sys161: System/161 release 2.0.3, compiled Aug  5 2015 14:02:38
+
+OS/161 base system version 1.99.08
+Copyright (c) 2000, 2001-2005, 2008-2011, 2013, 2014
+   President and Fellows of Harvard College.  All rights reserved.
+
+   Put-your-group-name-here's system version 0 (DUMBVM #1)
+
+   292k physical memory available
+   Device probe...
+   lamebus0 (system main bus)
+   emu0 at lamebus0
+   ltrace0 at lamebus0
+   ltimer0 at lamebus0
+   beep0 at ltimer0
+   rtclock0 at ltimer0
+   lrandom0 at lamebus0
+   random0 at lrandom0
+   lhd0 at lamebus0
+   lhd1 at lamebus0
+   lser0 at lamebus0
+   con0 at lser0
+
+   cpu0: MIPS/161 (System/161 2.x) features 0x0
+   OS/161 kernel [? for menu]:
+
+
+
+jharvard@appliance (~/os161/src): git log
+commit 7914a2f37884ee2d05e6efbf2ca9dc2874867700
+Author: jharvard <mo.mohammadosama@gmail.com>
+Date:   Mon Jan 18 19:40:27 2016 -0500
+
+    Initial commit of os161 for CPEN331
+
+
+jharvard@appliance (~/os161/src): git tag
+asst0-start
+
+
+------------------------------------------------------------------
+
+QUESTION ANSWERS
+
+q1)
+
+Trap handling code is located in the file (kern/arch/mips/locore/exception-mips1.S) and the first line is 69 if its UTLB exception and 87 for general exceptions. These are both ‘j common_exception’ which create a trapframe and is passed to mips_trap (kern/arch/mips/locore/trap.c) which call syscalls, vm faults. Interrupts go to main bus interrupt (kern/arch/sys161/dev/lamebus_machdep.c). Interrupts differ only in the way they are directed on mips_trap. 
+
+q2)
+
+syscall              /* make system call */ 
+
+In file ‘userland/lib/libc/arch/mips/syscalls-mips.S’ line line 84.
+
+q3)
+
+Those functions (basic C functions) are used both in the kernel and userland but we don’t want the user program to be able to modify them so we have created separate functions for the kernel.
+
+q4)
+
+It configures the hardware platform, machine type and sets the default optimize/debug flag.
+ 
+ Invalid:
+
+ Trying to run different platform/machine.
+ Invalid optimize/debug flag.
+
+ q5)
+
+ Functions are machine-dependent if they are written in assembly because you specify different registers/instructions sets depending on the architectures. Mainly for maintainability as it is easier to read/understand.
+
+ q6)
+
+ It is 148 bytes because in trapframe.h (ern/arch/mips/include/) - we have 37 unint32 which total to 148 bytes.
+
+ q7)
+
+ 1.Change configuration name or config file.
+ 2.Add/remove device in kernel config file.
+
+ q8)
+
+ if/when you change header file inclusions, or after re-running config
+
+q9)
+
+if you change any of the kernel headers exported to userland (the ones in src/kern/include/kern or src/arch/*/include/kern) or if you make changes to the userlevel libraries. If you make changes to a single program, it is sufficient to recompile and restall just it.
+
+q10)
+
+In the file (/home/jharvard/os161/src/kern/main/menu.c) – you can add the following function:
+
+static int cmd_hello(int nargs, char **args) {
+        (void)nargs;
+            (void)args;
+                kprintf("Hello world!\n";
+                    return 0;
+}
+
+Modify:
+
+static const char *opsmenu[] = {
+"[hello]   print hello world         ",
+"[s]       Shell                     ",
+"[p]       Other program             ",
+"[mount]   Mount a filesystem        ",
+"[unmount] Unmount a filesystem      ",
+ ...
+ };
+
+ Modify
+ static struct {
+ const char *name;
+ int (*func)(int nargs, char **args);
+ } cmdtable[] = {
+ /* menus */
+ { "hello",  cmd_hello },
+ { "?",      cmd_mainmenu },
+
+q11)
+Because the standard utilities (host system) are not compiled for the appropriate architecture.
+
+q12)
+
+The value is stored in the v0 register after which it is stored in the 
+s0 register.
+
+q13)
+
+Add case to kern/arch/mips/syscall/syscall.c:syscall()
+Add new entry with unique number to 
+Add a new entry with a unique number to kern/include/kern/syscall.h.
+Add a case to kern/arch/mips/syscall/syscall.c:syscall() to dispatch
+the call 
+
+Rerun kern/conf/config. Then do "bmake depend", "bmake", and "bmake install" in kern/compile/DUMBVM
+
+
+
