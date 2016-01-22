@@ -1,0 +1,51 @@
+1.  What happens to a thread when it exits (i.e., calls thread_exit())? What about when it sleeps?
+Removes virtual memory space (address space of thread is destroyed), decrements reference pointer, marked as zombie state and will panic if is runs again before it is dead. When it sleeps, it ensures it is not in an interrupt handler, goes to sleep state.
+
+2)  What function(s) handle(s) a context switch?
+    Thread switch and switchframe. 
+     
+3. What does it mean for a thread to be in each of the possible thread states?
+   Running means it is currently executing, sleeping (it not running), zombie (not yet deleted but the thread has exited) and ready (able to run but not running)
+     
+4. What does it mean to turn interrupts off? How is this accomplished? Why is it important to turn off interrupts in the thread subsystem code?
+Disabling interrupts – the interrupt handler will not pre-empt your current code. Although, we have locks which prevent processors from accessing shared data simultaneously, however, this does not prevent concurrent access from a possible interrupt handler thus requiring interrupts to be turned off. 
+Interrupts can be turned off by setting priority level high (splhigh) and turned on using spl0 (set priority level zero). It is important to turn them off because you want thread operations to complete and are not stopped midway during execution. 
+
+5. What happens when a thread wakes up another thread? How does a sleeping thread get to run again?
+The sleeping thread is removed from the queue and calls make_runnable  on the thread and is added to the end of the runqueue. It gets to run again when mi_switch is called and returned by scheduler.
+
+6) What function(s) choose(s) the next thread to run?
+
+thread_switch()  and schedule() .
+
+7) How does it (do they) pick the next thread?
+
+Using round robin que mechanism, each thread gets equal time slice without priorities.
+
+8) What role does the hardware timer play in scheduling? What hardware independent function is called on a timer interrupt?
+
+Hardware timer that generate an interrupt every N milliseconds and may request the scheduler to make threads that were waiting ready/running or cause threads that were waiting/running to be preempted. Hardclock function is called on timer interrupt.
+
+9) Describe how wchan_sleep() and wchan_wakeone() are used to implement semaphores.
+     P Operation
+     1) Acquire the spin lock
+     2) Check resources available (counter > 0)
+     3) Yes – go to step 8.
+     4) No, grab lock of the wait channel
+     5) Release the spin lock, and wait on the wait channel by calling wchan_sleep
+     6) Sleeping
+     7) After wake up, grab the spin lock, and go to step 2
+     8) At this point, the counter should be positive, decrement it by 1
+     9) Release the spin lock, and return
+     
+     V Operation
+     Acquire the spin lock
+     Increment the counter by 1
+     Wake up thread in the wait channel by calling wchan_wakeone()
+     Release the spin lock and return
+
+10)How does the implementation of wchan ensure that a thread never misses a wakeup signal: that another thread cannot attempt to awaken the first thread just as it is preparing to sleep, but before it is actually placed into the sleep queue?
+
+Because there is mutual exclusion and you can only do one at a time. 
+
+
