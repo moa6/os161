@@ -1,0 +1,58 @@
+1. What is the name of the very first function that executes when OS161 starts up? 
+__start
+
+
+2. What is the very first assembly instruction that executes? 
+54         addiu sp, sp, -24
+
+
+3.
+(gdb) info breakpoints
+Num     Type           Disp Enb Address    What
+1       breakpoint     keep y   0x800139e4 in kmain at ../../main/main.c:211
+2       breakpoint     keep y   0x80014a0c in menu at ../../main/menu.c:697
+
+
+4. Briefly describe what happens between the beginning of the execution and the invocation of the kernel main function. 
+Hardware setup: System/161 loader sets up a boot stack, kernel loads virtual address, sets status registers , etc.
+
+
+5. What is the assembly language instruction that calls the kernel main function? 
+
+jal kmain
+
+
+6) Step through the boot() code to find out what functions are called during early initialization. Paste the gdb output that shows you what these functions are.
+108             /* Early initialization. */
+109             ram_bootstrap();
+110             proc_bootstrap();
+111             thread_bootstrap();
+112             hardclock_bootstrap();
+113             vfs_bootstrap();
+114             kheap_nextgeneration();
+
+
+7) Set a breakpoint in thread_bootstrap(). Once you hit that breakpoint, at the very first line of that function, attempt to print the contents of the *bootcpu variable. Copy the output into the submit file
+
+(gdb) p *bootspu
+
+
+8. Now, step through that function until after the line that says 'bootcpu = cpu_create(0)'. Now print the content of *bootcpu and paste the output. 
+I'm not if it was referring to *bootcpu or bootcpu - so I printed both:
+
+(gdb) p *bootcpu
+Cannot access memory at address 0x80000
+
+(gdb) p bootcpu
+$1 = (struct cpu *) 0x80000
+
+
+9)
+(gdb) print allcpus
+$1 = {arr = {v = 0x0, num = 0, max = 0}}
+
+
+10)
+(gdb) print allcpus
+$3 = {arr = {v = 0x80039fe0, num = 1, max = 4}}
+
