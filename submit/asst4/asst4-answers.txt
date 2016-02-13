@@ -4,7 +4,7 @@
 
 2) UIO_USERISPACE contains user process code (process running in user space and executable) and UIO_USERSPACE contains user process data. UIO_SYSSPACE if the source or destination is the kernel
 
-3)
+3) The data from the memory read goes to the virtual address in the user space.
 
 
 4) In runprogram(), it is important to call vfs_close() before going into user mode because we no longer need to load the elf file.  If we do not call vfs_close() (close the vnode), the file would still considered to be open and the file object will never get deleted causing memory leak.
