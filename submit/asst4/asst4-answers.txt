@@ -1,30 +1,32 @@
-1) The ELF magic number is 07fELF.  The ELF magic number is defined on lines 83
-to 86 in ~/os161/src/kern/include/elf.h.
+1) ELF binary starts with the four-byte
 
-2) UIO_USERISPACE and UIO_USERSPACE both represent sources or destinations of
-data transfers between the user space and the kernel.  UIO_USERISPACE refers to
-the user process code while UIO_USERSPACE refers to user process data.  One
-would use UIO_SYSSPACE if the source or destination is the kernel.
+'0x7F','E','L','F' or ELF_MAGIC (0952) this is located in ~/os161/src/kern/include/elf.h.
+
+2) UIO_USERISPACE contains user process code (process running in user space and executable) and UIO_USERSPACE contains user process data. UIO_SYSSPACE if the source or destination is the kernel
 
 3)
 
-4) In runprogram(), it is important to call vfs_close() before going into user
-mode because we no longer need to load the elf file.  If we do not call
-vfs_close(), the file would still considered to be open and the file object will
-never get deleted.
 
-5) The function used to enter into user mode is enter_new_process defined on
-line 423 of ~/os161/src/kern/arch/mips/locore/trap.c.  The function is
-architectural dependent.
+4) In runprogram(), it is important to call vfs_close() before going into user mode because we no longer need to load the elf file.  If we do not call vfs_close() (close the vnode), the file would still considered to be open and the file object will never get deleted causing memory leak.
 
-6) Copyin and copyout are defined in ~/os161/src/kern/vm/copyinout.c.  Memmove
-is defined in ~/os161/src/common/libc/string/memmove.c.
 
-7)
+5)  In trap.c - enter_new_process forces to go to user mode. It is machine dependent:
+        passing argc/argv
+        * may use additional stack space on some other platforms (but not on mips).
+        line 423 of ~/os161/src/kern/arch/mips/locore/trap.c
 
-8) The numerical value of the exception code for a MIPS system call is 8.  The
-numerical value for the exception code is defined on line 91 of
-~/os161/src/kern/arch/mips/include/trapframe.h.
+
+*6) Copyin() and Copyout() are defined in copyinout.c and memmove() is defined in memmove.c. The first two functions copy blocks of memory across both user
+and kernel address and we do not need to worry about accessing offlimit addresses (protected by tm_badfaultfunc/copyfail).
+defined in ~/os161/src/common/libc/string/memmove.c
+
+
+7) It ensures that addresses are used with-in the proper userspace region.
+
+
+8) The value is 8 (The numerical value for the exception code is defined on line 91 of
+~/os161/src/kern/arch/mips/include/trapframe.h).
+
 
 9) An instruction in MIPS is four bytes long.  All MIPs instructions are the
 same length so the program counter will always be incremented by the instruction
@@ -32,29 +34,29 @@ length.  Line 141 of ~/os161/src/kern/arch/mips/syscall/syscall.c shows that the
 program counter is always advanced by four bytes.  Therefore, the MIPs
 instructions are four bytes in length.
 
-10)
+
+10) Don't want kernel to panic when we hit fatal fault in the user domain.
+
 
 11) If more than four arguments are needed for a system call, further arguments
-must be fetched from the user-level stack starting at sp+16 to skip over the
-slots for the registerized values, with copyin().
 
 12) The purpose of the SYSCALL macro is to dispatch the appropriate system call
-based on the system call number.  For instance, if the system call number is
++based on the system call number.  For instance, if the system call number is
 119, the SYSCALL macro calls sys_reboot.  The SYSCALL macro retrieves the system
 call number from register v0 of the trap frame.  The SYSCALL macro also obtains
 the arguments for the system call functions from registers in the trap frame.
 Finally, the SYSCALL macro returns any error codes.
 
-13) The instruction which triggers a system call is mips_trap defined on line
-126 in ~/os161/src/kern/arch/mips/locore/trap.c.
 
-14)
+13) syscall
 
-15) The kernel function used to open a file is called vfs_open defined on line
-45 of ~/os161/src/kern/vfs/vfs_open.c.  The macros to read from and write to a
-file are VOP_READ and VOP_WRITE respectively.  The data structure used in a
-kernel to represent an open file is a vnode.  
+
+14) The first four arguments must be passed in register a0-3 and 64-bit arguments must be in aligned registers. This means arg0 of lseek() will be in a0, arg1 in registers a2 and a3 with register a1 unused. The final argument will be found in the user level stack at sp+16. The 64-bit return value will be stored across registers v0 and v1.
+
+
+15) The kernel function used to open a file is called vfs_open defined on line 45 of ~/os161/src/kern/vfs/vfs_open.c.  The macros to read from and write to a file are VOP_READ and VOP_WRITE respectively.  The data structure used in a kernel to represent an open file is a vnode.
+
 
 16) The purpose of VOP_INCREF and VOP_DECREF is to respectively increment and
-decrement the vnode reference count.  The reference count keeps track of the
-number of references to the vnode.  
+decrement the vnode reference count.  The reference count keeps track of the number of
+references to the vnode
