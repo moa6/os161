@@ -430,10 +430,10 @@ sys_dup2 (int oldfd, int newfd, int* retval) {
 
 	if (oldfd > last_fd || curproc->p_filetable->entries[oldfd] == NULL ||
 oldfd < 0) {
-		/* Return EBADF is oldfd is an invalid file descriptor */
+		/* Return EBADF if oldfd is an invalid file descriptor */
 		return EBADF;
 	} else if (newfd >= OPEN_MAX || newfd < 0) {
-		/* Return EBADF is newfd is an invalid file descriptor */
+		/* Return EBADF if newfd is an invalid file descriptor */
 		return EBADF;
 	} else if (oldfd == newfd) {
 		/* If oldfd equals newfd, set the return value to newfd and
