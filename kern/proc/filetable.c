@@ -31,6 +31,7 @@
 #include <current.h>
 #include <vnode.h>
 #include <lib.h>
+#include <synch.h>
 #include <filetable.h>
 #include <kern/fcntl.h>
 
@@ -45,7 +46,7 @@ file_entry_create(void) {
 	struct file_entry *file_entry;
 	file_entry = kmalloc(sizeof(*file_entry));
 	
-	if(file_entry == NULL) {
+	if (file_entry == NULL) {
 		return NULL;
 	}
 
@@ -53,6 +54,12 @@ file_entry_create(void) {
 	file_entry->vn = NULL;
 	file_entry->openflags = 0;
 	file_entry->f_refcount = 0;
+	
+	file_entry->f_lock = lock_create("file entry lock");
+	if (file_entry->f_lock == NULL) {
+		panic("lock_create in file_entry_create failed\n");
+	}
+
 	return file_entry;
 }
 
@@ -64,7 +71,11 @@ file_entry_create(void) {
 void
 file_entry_destroy(struct file_entry *file_entry) {
 	KASSERT(file_entry != NULL);
-	kfree(file_entry);
+
+	if (file_entry->f_refcount == 1) {
+		lock_destroy(file_entry->f_lock);
+		kfree(file_entry);
+	}
 }
 
 /*
@@ -94,13 +105,6 @@ filetable_create(void) {
 		return NULL;
 	}
 	filetable->entries = temp;	
-
-/*
-	if (filetable->entries == NULL) {
-		KASSERT(filetable->entries != NULL);		
-		return NULL;
-	}
-*/
 
 	/* Reserve file descriptors 0, 1, and 2 for STDIN, STDOUT, and STDERR
  * respectively */
@@ -176,12 +180,15 @@ filetable_create(void) {
  */
 void
 filetable_destroy(struct filetable *filetable) {
+	KASSERT(filetable != NULL);
+	
 	int i;
 
-	KASSERT(filetable != NULL);
-	for (i=0; i<filetable->filetable_size; i++) {
+	for (i=0; i<filetable->last_fd; i++) {
 		file_entry_destroy(filetable->entries[i]);
 	}
+	
+	kfree(filetable->entries);
 	kfree(filetable);
 }
 
@@ -192,6 +199,8 @@ filetable_destroy(struct filetable *filetable) {
  */
 void
 filetable_grow(struct filetable *filetable) {
+	KASSERT(filetable != NULL);
+
 	int old_size;
 	int new_size;
 	struct file_entry **temp;
@@ -219,6 +228,8 @@ filetable_grow(struct filetable *filetable) {
  */
 void
 filetable_shrink(struct filetable *filetable) {
+	KASSERT(filetable != NULL);
+
 	int old_size;
 	int new_size;
 	struct file_entry **temp;
@@ -237,4 +248,41 @@ filetable_shrink(struct filetable *filetable) {
 	kfree(filetable->entries);
 	filetable->entries = temp;
 	filetable->filetable_size = new_size;
+}
+
+struct filetable*
+filetable_copy(struct filetable *filetable) {
+	KASSERT(filetable != NULL);
+
+	int i;
+	int dest_size;
+	struct filetable * dest_filetable;
+	struct file_entry **dest_entries;	
+
+	dest_size = filetable->filetable_size;
+	dest_filetable = filetable_create(); 
+	if (dest_filetable == NULL) {
+		return NULL;
+	}
+
+	
+	dest_entries = kmalloc(dest_size*sizeof(struct filetable_entry*));
+	if (dest_entries == NULL) {
+		return NULL;
+	}
+	memcpy(dest_entries, filetable->entries, dest_size*sizeof(struct
+filetable_entry*));
+	kfree(dest_filetable->entries);
+	dest_filetable->entries = dest_entries;
+	dest_filetable->filetable_size = dest_size;
+	dest_filetable->last_fd = filetable->last_fd;
+
+	for (i=0; i < dest_filetable->last_fd; i++) {
+		if (dest_filetable->entries[i] != NULL) {
+			lock_acquire(dest_filetable->entries[i]->f_lock);
+			dest_filetable->entries[i]->f_refcount++;
+			lock_release(dest_filetable->entries[i]->f_lock);
+		}
+	}
+	return dest_filetable;
 }
