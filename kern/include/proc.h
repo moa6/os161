@@ -59,6 +59,9 @@ struct proc {
 
 	/* add more material here as needed */
 	struct filetable *p_filetable;
+	struct proclist *p_children;
+	struct proc *p_parent;
+	pid_t p_pid;
 };
 
 /* This is the process structure for the kernel and for kernel-only threads. */
@@ -66,6 +69,8 @@ extern struct proc *kproc;
 
 /* Call once during system startup to allocate data structures. */
 void proc_bootstrap(void);
+
+int proc_create_user(const char *name, struct proc **proc);
 
 /* Create a fresh process for use by runprogram(). */
 struct proc *proc_create_runprogram(const char *name);

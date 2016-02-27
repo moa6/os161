@@ -27,51 +27,34 @@
  * SUCH DAMAGE.
  */
 
-#ifndef _FILETABLE_H_
-#define _FILETABLE_H_
+#ifndef _PID_H_
+#define _PID_H_
 
-/*
- * Definition of a file description entry
- *
- */
 #include <types.h>
-#include <vnode.h>
 #include <lib.h>
-#include <vfs.h>
+#include <pidlist.h>
 
 /*
- * file descriptor table structures
+ * pid table structure
  */
-struct file_entry {
-	struct vnode *vn; // vnode
-	int openflags; // openflags for the file
-	off_t seek; // seek position
-	int f_refcount; // reference count tracking number of file descriptors
-			// pointing to the file table entry
-	struct lock *f_lock; 
+struct pidtable {
+	struct lock *pid_lock;
+	pid_t last_pid;
+	struct pidlist *freed_pids;
 };
 
-struct filetable {
-	int filetable_size; // size of the file table
-	int last_fd; // last used file dsecriptor
-	struct file_entry **entries; // dynamic array of file table entries
-};
+extern struct pidtable *pidtable;
 
 /*
- * Prototypes for file descriptor table functions
+ * Prototypes for pid table functions
  */
-struct file_entry *file_entry_create(void);
 
-void file_entry_destroy(struct file_entry *file_entry);
+void pidtable_bootstrap(void);
 
-struct filetable *filetable_create(void);
+bool find_pid(pid_t pid);
 
-void filetable_destroy(struct filetable *filetable);
+int get_pid(pid_t* pid);
 
-void filetable_grow(struct filetable *filetable);
-
-void filetable_shrink(struct filetable *filetable);
-
-struct filetable *filetable_copy(struct filetable *filetable);
+int free_pid(pid_t pid);
 
 #endif

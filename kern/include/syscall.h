@@ -30,7 +30,7 @@
 #ifndef _SYSCALL_H_
 #define _SYSCALL_H_
 
-
+#include <addrspace.h>
 #include <cdefs.h> /* for __DEAD */
 struct trapframe; /* from <machine/trapframe.h> */
 
@@ -45,7 +45,7 @@ void syscall(struct trapframe *tf);
  */
 
 /* Helper for fork(). You write this. */
-void enter_forked_process(struct trapframe *tf);
+void enter_forked_process(void* ptr, unsigned long nargs);
 
 /* Enter user mode. Does not return. */
 __DEAD void enter_new_process(int argc, userptr_t argv, userptr_t env,
@@ -66,4 +66,8 @@ int sys_lseek(int fd, off_t pos, int whence, int* retval, int* retval_v1);
 int sys_dup2 (int oldfd, int newfd, int* retval);
 int sys___getcwd(void* buf, size_t buflen, int* retval);
 int sys_chdir(const_userptr_t pathname, int* retval);
+int sys_fork(struct trapframe *tf, pid_t* retval);
+int sys_getpid(pid_t* retval);
+int sys_waitpid(pid_t pid, userptr_t status, int options, pid_t* retval);
+void sys__exit(int exitcode);
 #endif /* _SYSCALL_H_ */

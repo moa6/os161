@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013
+ * Copyright (c) 2009
  *	The President and Fellows of Harvard College.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -27,51 +27,26 @@
  * SUCH DAMAGE.
  */
 
-#ifndef _FILETABLE_H_
-#define _FILETABLE_H_
+#ifndef _PIDLIST_H_
+#define _PIDLIST_H_
 
-/*
- * Definition of a file description entry
- *
- */
 #include <types.h>
-#include <vnode.h>
 #include <lib.h>
-#include <vfs.h>
 
-/*
- * file descriptor table structures
- */
-struct file_entry {
-	struct vnode *vn; // vnode
-	int openflags; // openflags for the file
-	off_t seek; // seek position
-	int f_refcount; // reference count tracking number of file descriptors
-			// pointing to the file table entry
-	struct lock *f_lock; 
+struct pidnode {
+	pid_t pid;
+	struct pidnode *next;
 };
 
-struct filetable {
-	int filetable_size; // size of the file table
-	int last_fd; // last used file dsecriptor
-	struct file_entry **entries; // dynamic array of file table entries
+struct pidlist {
+	struct pidnode *head;
+	struct pidnode *tail;
 };
 
-/*
- * Prototypes for file descriptor table functions
- */
-struct file_entry *file_entry_create(void);
-
-void file_entry_destroy(struct file_entry *file_entry);
-
-struct filetable *filetable_create(void);
-
-void filetable_destroy(struct filetable *filetable);
-
-void filetable_grow(struct filetable *filetable);
-
-void filetable_shrink(struct filetable *filetable);
-
-struct filetable *filetable_copy(struct filetable *filetable);
+struct pidlist* pidlist_init(void);
+bool pidlist_isempty(struct pidlist* plist);
+bool pidlist_find(struct pidlist *plist, pid_t pid);
+int pidlist_remhead(struct pidlist* plist);
+int pidlist_addtail(struct pidlist* plist, int pid);
 
 #endif
