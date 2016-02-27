@@ -28,6 +28,7 @@
  */
 
 #include <types.h>
+#include <proc.h>
 #include <kern/errno.h>
 #include <kern/syscall.h>
 #include <copyinout.h>
@@ -158,6 +159,24 @@ sizeof(int));
 		err = sys_chdir((const_userptr_t)tf->tf_a0, &retval);
 		break;
 
+	    case SYS_fork:
+		err = sys_fork(tf, &retval);
+		break;
+
+	    case SYS_getpid:
+		err = sys_getpid(&retval);
+		break;
+
+	    case SYS_waitpid:
+		err = sys_waitpid(tf->tf_v0, (userptr_t)tf->tf_v1, tf->tf_a2,
+&retval);
+		break;
+
+	    case SYS__exit:
+		sys__exit(tf->tf_v0);
+		panic("sys__exit returned\n");
+		break;
+
 	    default:
 		kprintf("Unknown syscall %d\n", callno);
 		err = ENOSYS;
@@ -202,7 +221,21 @@ sizeof(int));
  * Thus, you can trash it and do things another way if you prefer.
  */
 void
-enter_forked_process(struct trapframe *tf)
+enter_forked_process(void *ptr, unsigned long nargs)
 {
-	(void)tf;
+	KASSERT(nargs == 2);
+
+	void** argv = ptr;
+	struct trapframe *tf = (struct trapframe *)argv[0];
+	struct trapframe newtf = *tf;
+	struct addrspace *newas = (struct addrspace *)argv[1];
+
+/*
+	KASSERT(nargs != 2);
+*/
+	proc_setas(newas);
+	as_activate();
+	kfree(tf);
+	mips_usermode(&newtf);
+
 }
