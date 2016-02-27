@@ -39,6 +39,7 @@
 #include <spl.h>
 #include <clock.h>
 #include <thread.h>
+#include <pid.h>
 #include <proc.h>
 #include <current.h>
 #include <synch.h>
@@ -70,7 +71,6 @@ extern const char buildconfig[];
 static const char harvard_copyright[] =
     "Copyright (c) 2000, 2001-2005, 2008-2011, 2013, 2014\n"
     "   President and Fellows of Harvard College.  All rights reserved.\n";
-
 
 /*
  * Initial boot sequence.
@@ -107,6 +107,7 @@ boot(void)
 
 	/* Early initialization. */
 	ram_bootstrap();
+	pidtable_bootstrap();
 	proc_bootstrap();
 	thread_bootstrap();
 	hardclock_bootstrap();
