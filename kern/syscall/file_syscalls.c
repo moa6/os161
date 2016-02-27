@@ -32,6 +32,7 @@
 #include <limits.h>
 #include <copyinout.h>
 #include <syscall.h>
+#include <synch.h>
 #include <current.h>
 #include <proc.h>
 #include <stat.h>
@@ -145,7 +146,9 @@ sys_close(int fd, int* retval)
         } else if (curproc->p_filetable->entries[fd]->f_refcount > 1) {
 		/* If more than one file descriptor is pointing to the file
  * entry, then decrement f_refcount and set fd pointing to NULL */
+		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
                 curproc->p_filetable->entries[fd]->f_refcount--;
+		lock_release(curproc->p_filetable->entries[fd]->f_lock);
                 curproc->p_filetable->entries[fd] = NULL;
         } else {
 		/* Call vfs_close which does most of the work of the close
@@ -250,7 +253,9 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		/* Calculate the number of bytes written */
 		bytes_write = ku.uio_offset - pos;
 		/* Update the seek position */
+		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 		curproc->p_filetable->entries[fd]->seek = ku.uio_offset;
+		lock_release(curproc->p_filetable->entries[fd]->f_lock);
 		/* Free the kernel buffer */
 		kfree(kbuf);
 		/* Set the return value to the number of bytes written and
@@ -328,7 +333,9 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 		/* Calculate the number of bytes read */
 		bytes_read = ku.uio_offset - pos;
 		/* Update the seek position */
+		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 		curproc->p_filetable->entries[fd]->seek = ku.uio_offset;
+		lock_release(curproc->p_filetable->entries[fd]->f_lock);
 		/* Free the kernel buffer */
 		kfree(kbuf);
 
@@ -405,7 +412,9 @@ sys_lseek(int fd, off_t pos, int whence, int* retval, int* retval_v1)
 		} 
 
 		/* Update the seek position */
+		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 		curproc->p_filetable->entries[fd]->seek = new_seek;
+		lock_release(curproc->p_filetable->entries[fd]->f_lock);
 		/* Set the return value to the new seek position and return 0 */
 		*retval = (int)(new_seek >> 32);
 		*retval_v1 = (int)((new_seek << 32) >> 32);
