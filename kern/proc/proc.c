@@ -45,14 +45,21 @@
 #include <types.h>
 #include <spl.h>
 #include <proc.h>
+#include <kern/errno.h>
+#include <pid.h>
 #include <current.h>
+#include <synch.h>
 #include <addrspace.h>
 #include <vnode.h>
+#include <limits.h>
+#include <proclist.h>
 #include <filetable.h>
 /*
  * The process for the kernel; this holds all the kernel-only threads.
  */
 struct proc *kproc;
+
+//struct pidtable *pidtable;
 
 /*
  * Create a proc structure.
@@ -84,6 +91,15 @@ proc_create(const char *name)
 
 	proc->p_filetable = NULL;
 
+	proc->p_children = proclist_init();
+	if (proc->p_children == NULL) {
+		return NULL;
+	}
+
+	proc->p_parent = NULL;
+
+	proc->p_pid = PID_MIN - 1;
+
 	return proc;
 }
 
@@ -106,6 +122,8 @@ proc_destroy(struct proc *proc)
 
 	KASSERT(proc != NULL);
 	KASSERT(proc != kproc);
+
+	int result;
 
 	/*
 	 * We don't take p_lock in here because we must have the only
@@ -171,11 +189,29 @@ proc_destroy(struct proc *proc)
 	spinlock_cleanup(&proc->p_lock);
 
 	filetable_destroy(proc->p_filetable);
+	proclist_destroy(proc->p_children);
+	
+	result = free_pid(proc->p_pid);
+	if (result) {
+		kfree(proc->p_name);
+		kfree(proc);
+		panic("freepid failed\n");	
+	}
 
 	kfree(proc->p_name);
 	kfree(proc);
 }
 
+/*
+void
+proc_init_pidtable(void)
+{
+	pidtable = pidtable_init();
+	if (pidtable == NULL) {
+		panic("pidtable_init failed\n");
+	}
+}
+*/
 /*
  * Create the process structure for the kernel.
  */
@@ -188,6 +224,28 @@ proc_bootstrap(void)
 	}
 }
 
+int
+proc_create_user(const char *name, struct proc **proc)
+{
+	int result;
+	struct proc *uproc;
+	uproc = proc_create(name);
+	if (uproc == NULL) {
+		*proc = NULL;
+		return ENOMEM;
+	}
+
+	result = get_pid(&uproc->p_pid);
+	if (result) {
+		kfree(uproc);
+		*proc = NULL;
+		return result;
+	}
+
+	*proc = uproc;
+	return 0;
+}
+
 /*
  * Create a fresh proc for use by runprogram.
  *
@@ -197,6 +255,7 @@ proc_bootstrap(void)
 struct proc *
 proc_create_runprogram(const char *name)
 {
+	int result;
 	struct proc *newproc;
 
 	newproc = proc_create(name);
@@ -207,6 +266,11 @@ proc_create_runprogram(const char *name)
 	/* VM fields */
 
 	newproc->p_addrspace = NULL;
+
+	result = get_pid(&newproc->p_pid);
+	if (result) {
+		return NULL;
+	}
 
 	/* VFS fields */
 
@@ -223,9 +287,6 @@ proc_create_runprogram(const char *name)
 	spinlock_release(&curproc->p_lock);
 
 	newproc->p_filetable = filetable_create();
-	if (newproc->p_filetable == NULL) {
-		panic("filetable_create for newproc->p_filetable failed\n");
-	}
 
 	return newproc;
 }
