@@ -61,18 +61,26 @@ pidlist_isempty(struct pidlist* plist) {
 
 bool
 pidlist_find(struct pidlist* plist, pid_t pid) {
-	KASSERT(plist != NULL);
-	KASSERT(pid >= PID_MIN && pid <= PID_MAX); 
-
 	struct pidnode *itvar;
 
-	for (itvar = plist->head; itvar != NULL; itvar = itvar->next) {
-		if (itvar->pid == pid) {
-			return true;
-		}
-	}
+	if (plist == NULL) {
+		return false;
 
-	return false;
+	} else if (pidlist_isempty(plist)) {
+		return false;
+
+	} else if (pid < PID_MIN || pid > PID_MAX) {
+		return false;
+
+	} else {
+		for (itvar = plist->head; itvar != NULL; itvar = itvar->next) {
+			if (itvar->pid == pid) {
+				return true;
+			}
+		}
+
+		return false;
+	}
 }
 
 int
@@ -117,8 +125,13 @@ pidlist_addtail(struct pidlist* plist, int pid) {
 		plist->tail = p_tail;
 	} else {
 		p_tail->next = kmalloc(sizeof(*p_tail));
+		if (p_tail->next == NULL) {
+			return ENOMEM;
+		}
+
 		p_tail = p_tail->next;
 		p_tail->pid = pid;
+		p_tail->next = NULL;
 		plist->tail = p_tail;
 	}
 

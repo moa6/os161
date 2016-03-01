@@ -123,8 +123,6 @@ proc_destroy(struct proc *proc)
 	KASSERT(proc != NULL);
 	KASSERT(proc != kproc);
 
-	int result;
-
 	/*
 	 * We don't take p_lock in here because we must have the only
 	 * reference to this structure. (Otherwise it would be
@@ -188,30 +186,13 @@ proc_destroy(struct proc *proc)
 	threadarray_cleanup(&proc->p_threads);
 	spinlock_cleanup(&proc->p_lock);
 
-	filetable_destroy(proc->p_filetable);
-	proclist_destroy(proc->p_children);
+//	filetable_destroy(proc->p_filetable);
+//	proclist_destroy(proc->p_children);
 	
-	result = free_pid(proc->p_pid);
-	if (result) {
-		kfree(proc->p_name);
-		kfree(proc);
-		panic("freepid failed\n");	
-	}
-
 	kfree(proc->p_name);
 	kfree(proc);
 }
 
-/*
-void
-proc_init_pidtable(void)
-{
-	pidtable = pidtable_init();
-	if (pidtable == NULL) {
-		panic("pidtable_init failed\n");
-	}
-}
-*/
 /*
  * Create the process structure for the kernel.
  */
@@ -270,7 +251,7 @@ proc_create_runprogram(const char *name)
 	result = get_pid(&newproc->p_pid);
 	if (result) {
 		return NULL;
-	}
+	}	
 
 	/* VFS fields */
 
@@ -337,24 +318,25 @@ proc_remthread(struct thread *t)
 	int spl;
 
 	proc = t->t_proc;
-	KASSERT(proc != NULL);
 
-	spinlock_acquire(&proc->p_lock);
-	/* ugh: find the thread in the array */
-	num = threadarray_num(&proc->p_threads);
-	for (i=0; i<num; i++) {
-		if (threadarray_get(&proc->p_threads, i) == t) {
-			threadarray_remove(&proc->p_threads, i);
-			spinlock_release(&proc->p_lock);
-			spl = splhigh();
-			t->t_proc = NULL;
-			splx(spl);
-			return;
+	if (proc != NULL) {
+		spinlock_acquire(&proc->p_lock);
+		/* ugh: find the thread in the array */
+		num = threadarray_num(&proc->p_threads);
+		for (i=0; i<num; i++) {
+			if (threadarray_get(&proc->p_threads, i) == t) {
+				threadarray_remove(&proc->p_threads, i);
+				spinlock_release(&proc->p_lock);
+				spl = splhigh();
+				t->t_proc = NULL;
+				splx(spl);
+				return;
+			}
 		}
+		/* Did not find it. */
+		spinlock_release(&proc->p_lock);
+		panic("Thread (%p) has escaped from its process (%p)\n", t, proc);
 	}
-	/* Did not find it. */
-	spinlock_release(&proc->p_lock);
-	panic("Thread (%p) has escaped from its process (%p)\n", t, proc);
 }
 
 /*

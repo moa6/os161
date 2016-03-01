@@ -62,14 +62,17 @@ bool
 find_pid(pid_t pid) {
 	KASSERT(pidtable != NULL);
 
+	lock_acquire(pidtable->pid_lock);
 	if (pid > pidtable->last_pid) {
+		lock_release(pidtable->pid_lock);
 		return false;
 	} else if (pidlist_find(pidtable->freed_pids, pid)) {
+		lock_release(pidtable->pid_lock);
 		return false;	
 	} else {
+		lock_release(pidtable->pid_lock);
 		return true;
 	}
-	
 }
 
 int
@@ -87,7 +90,9 @@ get_pid(pid_t* pid) {
 			return 0;
 		}
 	} else {
+		lock_acquire(pidtable->pid_lock);
 		*pid = pidlist_remhead(pidtable->freed_pids);
+		lock_release(pidtable->pid_lock);
 		return 0;
 	}
 }
@@ -99,6 +104,8 @@ free_pid(pid_t pid) {
 
 	int result;
 	
+	lock_acquire(pidtable->pid_lock);
 	result = pidlist_addtail(pidtable->freed_pids, pid);
+	lock_release(pidtable->pid_lock);
 	return result;	
 }

@@ -32,6 +32,7 @@
 #include <vnode.h>
 #include <lib.h>
 #include <synch.h>
+#include <syscall.h>
 #include <filetable.h>
 #include <kern/fcntl.h>
 
@@ -72,10 +73,8 @@ void
 file_entry_destroy(struct file_entry *file_entry) {
 	KASSERT(file_entry != NULL);
 
-	if (file_entry->f_refcount == 1) {
-		lock_destroy(file_entry->f_lock);
-		kfree(file_entry);
-	}
+	lock_destroy(file_entry->f_lock);
+	kfree(file_entry);
 }
 
 /*
@@ -97,13 +96,24 @@ filetable_create(void) {
 
 	/* Allocate a file table and set it to an initial size of 8 */
 	filetable = kmalloc(sizeof(*filetable));
-	filetable_size = 8;
-	filetable->filetable_size = filetable_size;
-	temp = kmalloc(filetable_size*sizeof(*filetable->entries));
-	if (temp == NULL) {
-		KASSERT(temp != NULL);
+	if (filetable == NULL) {
 		return NULL;
 	}
+	
+	filetable_size = 8;
+	filetable->filetable_size = filetable_size;
+
+	temp = kmalloc(filetable_size*sizeof(*filetable->entries));
+
+	if (temp == NULL) {
+		kfree(filetable);
+		return NULL;
+	}
+
+	for (i = 0; i < filetable_size; i++) {
+		temp[i] = NULL;
+	}	
+
 	filetable->entries = temp;	
 
 	/* Reserve file descriptors 0, 1, and 2 for STDIN, STDOUT, and STDERR
@@ -125,6 +135,7 @@ filetable_create(void) {
 		
 	result = vfs_open(con_stdin, O_RDONLY, 0664, &vn);
 	if (result) {
+		kfree(filetable);
 		kfree(con_stdin);
 		kfree(con_stdout);
 		kfree(con_stderr);
@@ -138,6 +149,7 @@ filetable_create(void) {
 
 	result = vfs_open(con_stdout, O_WRONLY, 0664, &vn);
 	if (result) {
+		kfree(filetable);
 		kfree(con_stdin);
 		kfree(con_stdout);
 		kfree(con_stderr);
@@ -151,6 +163,7 @@ filetable_create(void) {
 
 	result = vfs_open(con_stderr, O_WRONLY, 0664, &vn);
 	if (result) {
+		kfree(filetable);
 		kfree(con_stdin);
 		kfree(con_stdout);
 		kfree(con_stderr);
@@ -183,13 +196,18 @@ filetable_destroy(struct filetable *filetable) {
 	KASSERT(filetable != NULL);
 	
 	int i;
+	int retval;
 
-	for (i=0; i<filetable->last_fd; i++) {
-		file_entry_destroy(filetable->entries[i]);
+	for (i=0; i<=filetable->last_fd; i++) {
+		if (filetable->entries[i] != NULL) {
+			sys_close(i, &retval);
+		}
 	}
 	
 	kfree(filetable->entries);
+	filetable->entries = NULL;
 	kfree(filetable);
+	filetable = NULL;
 }
 
 /*
@@ -201,6 +219,7 @@ void
 filetable_grow(struct filetable *filetable) {
 	KASSERT(filetable != NULL);
 
+	int i;
 	int old_size;
 	int new_size;
 	struct file_entry **temp;
@@ -215,6 +234,11 @@ filetable_grow(struct filetable *filetable) {
 	if (temp == NULL) {
 		panic("filetable_grow: kmalloc failed\n");
 	}
+
+	for (i=0; i<new_size; i++) {
+		temp[i] = NULL;
+	}
+
 	memcpy(temp, filetable->entries, old_size*sizeof(struct filetable_entry*));
 	kfree(filetable->entries);
 	filetable->entries = temp;
@@ -230,6 +254,7 @@ void
 filetable_shrink(struct filetable *filetable) {
 	KASSERT(filetable != NULL);
 
+	int i;
 	int old_size;
 	int new_size;
 	struct file_entry **temp;
@@ -244,6 +269,11 @@ filetable_shrink(struct filetable *filetable) {
 	if (temp == NULL) {
 		panic("filetable_shrink: kmalloc failed\n");
 	}
+
+	for (i=0; i<new_size; i++) {
+		temp[i] = NULL;
+	}
+
 	memcpy(temp, filetable->entries, new_size*sizeof(struct filetable_entry*));
 	kfree(filetable->entries);
 	filetable->entries = temp;
@@ -260,24 +290,29 @@ filetable_copy(struct filetable *filetable) {
 	struct file_entry **dest_entries;	
 
 	dest_size = filetable->filetable_size;
-	dest_filetable = filetable_create(); 
+	dest_filetable = kmalloc(sizeof(*dest_filetable));
+//	dest_filetable = filetable_create();
 	if (dest_filetable == NULL) {
 		return NULL;
 	}
-
 	
 	dest_entries = kmalloc(dest_size*sizeof(struct filetable_entry*));
 	if (dest_entries == NULL) {
+		kfree(dest_filetable);
 		return NULL;
 	}
+
+	for(i=0; i<dest_size; i++) {
+		dest_entries[i] = NULL;
+	}	
+
 	memcpy(dest_entries, filetable->entries, dest_size*sizeof(struct
 filetable_entry*));
-	kfree(dest_filetable->entries);
 	dest_filetable->entries = dest_entries;
 	dest_filetable->filetable_size = dest_size;
 	dest_filetable->last_fd = filetable->last_fd;
 
-	for (i=0; i < dest_filetable->last_fd; i++) {
+	for (i=0; i <= dest_filetable->last_fd; i++) {
 		if (dest_filetable->entries[i] != NULL) {
 			lock_acquire(dest_filetable->entries[i]->f_lock);
 			dest_filetable->entries[i]->f_refcount++;
