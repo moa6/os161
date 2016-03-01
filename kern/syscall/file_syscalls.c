@@ -108,7 +108,9 @@ sys_open(const_userptr_t filename, int flags, mode_t mode, int* retval)
 	curproc->p_filetable->entries[fd]->vn = v;
 	curproc->p_filetable->entries[fd]->openflags = flags & O_ACCMODE;
 	curproc->p_filetable->entries[fd]->seek = 0;
+	lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 	curproc->p_filetable->entries[fd]->f_refcount++;
+	lock_release(curproc->p_filetable->entries[fd]->f_lock);
 
 	/* Set the last_fd if necessary */
 	if (fd > last_fd) {
@@ -147,17 +149,28 @@ sys_close(int fd, int* retval)
 		/* If more than one file descriptor is pointing to the file
  * entry, then decrement f_refcount and set fd pointing to NULL */
 		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
-                curproc->p_filetable->entries[fd]->f_refcount--;
-		lock_release(curproc->p_filetable->entries[fd]->f_lock);
-                curproc->p_filetable->entries[fd] = NULL;
-        } else {
+
+		if (curproc->p_filetable->entries[fd]->f_refcount > 1) {
+			curproc->p_filetable->entries[fd]->f_refcount--;
+			lock_release(curproc->p_filetable->entries[fd]->f_lock);
+			curproc->p_filetable->entries[fd] = NULL;
+			goto done;
+		} else {
+			lock_release(curproc->p_filetable->entries[fd]->f_lock);
+			goto close;
+		}
+
+        } 
+
+close:
 		/* Call vfs_close which does most of the work of the close
  * system call */
                 vfs_close(curproc->p_filetable->entries[fd]->vn);
 		/* Destroy the file table entry and set fd pointing to NULL */ 
                 file_entry_destroy(curproc->p_filetable->entries[fd]);
                 curproc->p_filetable->entries[fd] = NULL;
-        }
+       
+done:
 
 	/* Determine if the file table needs to be re-sized */
         if (fd == last_fd) {
@@ -178,6 +191,8 @@ sys_close(int fd, int* retval)
 			filetable_shrink(curproc->p_filetable);
 		}
 	}
+
+	curproc->p_filetable->last_fd = last_fd;
 
 	/* Set the return value to 0 and return 0 */
         *retval = 0;
@@ -203,7 +218,7 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 	struct uio ku;
 	struct iovec iov;
 	struct vnode *vn;
-	void* kbuf;
+//	void* kbuf;
 
 	/* Set the return value to -1 */
 	*retval = -1;
@@ -214,9 +229,6 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 	if (fd > last_fd || curproc->p_filetable->entries[fd] == NULL || fd < 0) {
 		/* Return EBADF if fd is not a valid file descriptor */
 		return EBADF;
-	} else if (buf == NULL) {
-		/* Return EFAULT if buf is not valid */
-		return EFAULT;
 	} else {
 		/* Check the openflags of the file.  Return EBADF if the there
  * are no write permissions to the file */
@@ -230,23 +242,36 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		pos = curproc->p_filetable->entries[fd]->seek;
 
 		/* Create a kernel buffer */
-		kbuf = kmalloc(buflen*sizeof(void));
-		if (kbuf == NULL) {
-			return ENOMEM;
-		}
+//		kbuf = kmalloc(buflen*sizeof(void));
+//		if (kbuf == NULL) {
+//			return ENOMEM;
+//		}
 
-		/* Copy data from buf in user space to the kernel buffer */
-		result = copyin((const_userptr_t)buf, kbuf, buflen);
-		if (result) {
-			kfree(kbuf);
-			return result;
-		}
+	/* Copy data from buf in user space to the kernel buffer */
+//		result = copyin((const_userptr_t)buf, kbuf, buflen);
+//		if (result) {
+//			kfree(kbuf);
+//			return result;
+//		}
 
 		/* Initialize uio and perform the write */
-		uio_kinit(&iov, &ku, (void*)kbuf, buflen, pos, UIO_WRITE);
+//		uio_kinit(&iov, &ku, kbuf, buflen, pos, UIO_WRITE);
+
+
+		iov.iov_kbase = buf;
+		iov.iov_len = buflen;
+		ku.uio_iov = &iov;
+		ku.uio_iovcnt = 1;
+		ku.uio_offset = pos;
+		ku.uio_resid = buflen;
+		ku.uio_segflg = UIO_USERSPACE;
+		ku.uio_rw = UIO_WRITE;
+		ku.uio_space = curproc->p_addrspace;
+
 		result = VOP_WRITE(vn, &ku);
+
 		if (result) {
-			kfree(kbuf);
+//			kfree(kbuf);
 			return result;
 		}
 
@@ -257,7 +282,7 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		curproc->p_filetable->entries[fd]->seek = ku.uio_offset;
 		lock_release(curproc->p_filetable->entries[fd]->f_lock);
 		/* Free the kernel buffer */
-		kfree(kbuf);
+//		kfree(kbuf);
 		/* Set the return value to the number of bytes written and
  * return 0 */
 		*retval = (int)bytes_write;
@@ -284,7 +309,7 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 	struct uio ku;
 	struct iovec iov;
 	struct vnode *vn;
-	void* kbuf;
+//	void* kbuf;
 
 	/* Set the return value to -1 */
 	*retval = -1;
@@ -294,9 +319,6 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 	if (fd > last_fd || curproc->p_filetable->entries[fd] == NULL || fd < 0) {
 		/* Return EBADF if fd is not a valid file descriptor */
 		return EBADF;
-	} else if (buf == NULL) {
-		/* Return EFAULT if buf is not valid */
-		return EFAULT;
 	} else {
 		/* Check the open flags of the file.  Return EBADF if there are
  * no read permissions to the file */
@@ -310,25 +332,37 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 		pos = curproc->p_filetable->entries[fd]->seek;
 		
 		/* Create a kernel buffer */
-		kbuf = kmalloc(buflen*sizeof(void));
-		if (kbuf == NULL) {
-			return ENOMEM;
-		}		
+//		kbuf = kmalloc(buflen*sizeof(void));
+//		if (kbuf == NULL) {
+//			return ENOMEM;
+//		}		
 
 		/* Initialize a uio and perform the read */
-		uio_kinit(&iov, &ku, kbuf, buflen, pos, UIO_READ);
+//		uio_kinit(&iov, &ku, kbuf, buflen, pos, UIO_READ);
+
+		iov.iov_kbase = buf;
+		iov.iov_len = buflen;
+		ku.uio_iov = &iov;
+		ku.uio_iovcnt = 1;
+		ku.uio_offset = pos;
+		ku.uio_resid = buflen;
+		ku.uio_segflg = UIO_USERSPACE;
+		ku.uio_rw = UIO_READ;
+		ku.uio_space = curproc->p_addrspace;
+
+
 		result = VOP_READ(vn, &ku);
 		if (result) {
-			kfree(buf);
+//			kfree(buf);
 			return result;
 		}
 
 		/* Copy the data from the kernel buffer to buf in user space */
-		result = copyout(kbuf, (userptr_t)buf, buflen);
-		if (result) {
-			kfree(kbuf);
-			return result;
-		}
+//		result = copyout(kbuf, (userptr_t)buf, buflen);
+//		if (result) {
+//			kfree(kbuf);
+//			return result;
+//		}
 
 		/* Calculate the number of bytes read */
 		bytes_read = ku.uio_offset - pos;
@@ -337,7 +371,7 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 		curproc->p_filetable->entries[fd]->seek = ku.uio_offset;
 		lock_release(curproc->p_filetable->entries[fd]->f_lock);
 		/* Free the kernel buffer */
-		kfree(kbuf);
+//		kfree(kbuf);
 
 		/* Set the return value to the number of bytes read and return 0 */
 		*retval = (int)bytes_read;
@@ -370,11 +404,13 @@ sys_lseek(int fd, off_t pos, int whence, int* retval, int* retval_v1)
 	if (fd > last_fd || curproc->p_filetable->entries[fd] == NULL || fd < 0) {
 		/* Return EBADF if fd is not a valid file descriptor */
 		return EBADF;
-	} else { 
+	} else {
+		lock_acquire(curproc->p_filetable->entries[fd]->f_lock); 
 		old_seek = curproc->p_filetable->entries[fd]->seek;
 		result = VOP_STAT(curproc->p_filetable->entries[fd]->vn,
 &file_stat);
 		if (result) {
+			lock_release(curproc->p_filetable->entries[fd]->f_lock); 
 			return result;
 		}
 
@@ -398,21 +434,23 @@ sys_lseek(int fd, off_t pos, int whence, int* retval, int* retval_v1)
 
 		    default:
 			/* Return EINVAL if whence is invalid */
+			lock_release(curproc->p_filetable->entries[fd]->f_lock);
 			return EINVAL;
 		}
 
 		if ((file_stat.st_mode & S_IFCHR) == S_IFCHR) {
 			/* Return ESPIPE if file pointed to by fd does not
  * support seeking */
+			lock_release(curproc->p_filetable->entries[fd]->f_lock);
 			return ESPIPE;
 		} else if (new_seek < 0) {
 			/* Return EINVAL if the new seek position ends up being
  * less than zero */
+			lock_release(curproc->p_filetable->entries[fd]->f_lock);
 			return EINVAL;
 		} 
 
 		/* Update the seek position */
-		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 		curproc->p_filetable->entries[fd]->seek = new_seek;
 		lock_release(curproc->p_filetable->entries[fd]->f_lock);
 		/* Set the return value to the new seek position and return 0 */
@@ -460,7 +498,10 @@ oldfd < 0) {
 		/* Set oldfd and newfd to point to the same file entry */
 		curproc->p_filetable->entries[newfd] =
 curproc->p_filetable->entries[oldfd];
+		
+		lock_acquire(curproc->p_filetable->entries[newfd]->f_lock);
 		curproc->p_filetable->entries[newfd]->f_refcount++;
+		lock_release(curproc->p_filetable->entries[newfd]->f_lock);
 	
 		/* Updated last_fd is necessary */
 		if (newfd > last_fd) {
@@ -498,7 +539,6 @@ sys___getcwd(void* buf, size_t buflen, int* retval)
 		if (kbuf == NULL) {
 			return ENOMEM;
 		}
-
 		/* Initialize a uio and retrieve the name of the current
  * directory */
 		uio_kinit(&iov, &ku, kbuf, buflen, 0, UIO_READ);
