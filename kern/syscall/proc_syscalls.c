@@ -55,6 +55,7 @@ sys_fork(struct trapframe* tf, pid_t* retval) {
 	struct addrspace *cp_as;
 	struct filetable *cp_filetable;
 	struct proc *child_proc;
+	struct procnode *child_procnode;
 	void **argv;
 
 	*retval = -1;
@@ -67,15 +68,12 @@ sys_fork(struct trapframe* tf, pid_t* retval) {
 		return result;
 	}
 	
-	child_proc->p_parent = curproc;
-
-	result = proclist_add(curproc->p_children, child_proc);
-	if (result) {
-		kfree(child_proc);
-		panic("proclist_add in sys_fork failed\n");
-	}
-
 	cp_pid = child_proc->p_pid;
+
+	child_procnode = procnode_init();
+	child_procnode->pid = cp_pid;
+	proclist_add(curproc->p_children, child_procnode);
+	child_proc->p_parent = child_procnode;
 
         spinlock_acquire(&curproc->p_lock);
         if (curproc->p_cwd != NULL) {
@@ -192,49 +190,85 @@ sys_waitpid(pid_t pid, userptr_t status, int options, pid_t* retval) {
 		if (childnode == NULL) {
 			return ECHILD;
 
-		} else if (childnode->exited) {
-			*retval = childnode->exitcode;
-			return 0;		
-
-		} else if (options == WNOHANG) {
+		} else if (options == WNOHANG && childnode->pn_refcount > 1) {
 			*retval = 0;
 			return 0;
-		}
 
-		P(childnode->waitsem);
-		*kbuf = childnode->exitcode;
+		} else if (childnode->pn_refcount == 1) {
+			free_pid(pid);
+			*retval = childnode->exitcode;
+			proclist_remove(curproc->p_children, childnode);
+			return 0;
 
-		result = copyout(kbuf, status, sizeof(*kbuf));
-		if (result) {
+		} else {
+			P(childnode->waitsem);
+			KASSERT(childnode->pn_refcount == 1);
+			*kbuf = childnode->exitcode;
+
+			if (status != NULL) {
+				result = copyout(kbuf, status, sizeof(*kbuf));
+				if (result) {
+					proclist_remove(curproc->p_children, childnode);
+					kfree(kbuf);
+					free_pid(pid);
+					return result;
+				}
+		 	}
+
 			proclist_remove(curproc->p_children, childnode);
 			kfree(kbuf);
-			return result;
-		}
-
-		proclist_remove(curproc->p_children, childnode);
-		kfree(kbuf);
-
-		*retval = pid;
-		return 0; 
+			free_pid(pid);		
+	
+			*retval = pid;
+			return 0;
+		} 
 	}
 }
 
 void sys__exit(int exitcode) {
+	int result;
 	struct procnode *procnode;
+	struct proc *cur_p;
+	struct thread *cur_t;
 
-	if (curproc->p_parent != NULL) {
-		procnode = proclist_find(curproc->p_parent->p_children,
-curproc->p_pid);
+	procnode = curproc->p_parent;
 
-		if (procnode == NULL) {
-			panic("proclist_find in sys__exit failed\n");
+	if (procnode != NULL) {
+		KASSERT(procnode->pid == curproc->p_pid);
+	
+		if (procnode->pn_refcount > 1) {
+			lock_acquire(procnode->pn_lock);
+			if (procnode->pn_refcount == 1) {
+				lock_release(procnode->pn_lock);
+				result = free_pid(procnode->pid);
+				if (result) {
+					kfree(procnode);
+					panic("free_pid in sys__exit failed\n");
+				}
+				kfree(procnode);
+			} else {
+				procnode->exitcode = _MKWAIT_EXIT(exitcode);
+				procnode->pn_refcount--;
+				lock_release(procnode->pn_lock);
+				V(procnode->waitsem);
+			}			
+		} else {
+			result = free_pid(procnode->pid);
+			if (result) {
+				kfree(procnode);
+				panic("free_pid in sys__exit failed\n");
+			}
+			kfree(procnode);
 		}
 
-		procnode->exitcode = _MKWAIT_EXIT(exitcode);
-		procnode->exited = 1; 
-		V(procnode->waitsem);		
-	}	
-	
-	thread_exit();
-	proc_destroy(curproc);		
+	} else {
+		free_pid(curproc->p_pid);
+	}
+
+	filetable_destroy(curproc->p_filetable);
+	cur_p = curproc;
+	cur_t = curthread;
+	proc_remthread(cur_t);
+	proc_destroy(cur_p);	
+        thread_exit();	
 }
