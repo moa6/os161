@@ -168,12 +168,13 @@ sizeof(int));
 		break;
 
 	    case SYS_waitpid:
-		err = sys_waitpid(tf->tf_v0, (userptr_t)tf->tf_v1, tf->tf_a2,
+//		tf->tf_v0 = 3;
+		err = sys_waitpid(tf->tf_a0, (userptr_t)tf->tf_a1, tf->tf_a2,
 &retval);
 		break;
 
 	    case SYS__exit:
-		sys__exit(tf->tf_v0);
+		sys__exit(tf->tf_a0);
 		panic("sys__exit returned\n");
 		break;
 
@@ -230,9 +231,6 @@ enter_forked_process(void *ptr, unsigned long nargs)
 	struct trapframe newtf = *tf;
 	struct addrspace *newas = (struct addrspace *)argv[1];
 
-/*
-	KASSERT(nargs != 2);
-*/
 	proc_setas(newas);
 	as_activate();
 	kfree(tf);
