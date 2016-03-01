@@ -34,7 +34,13 @@
 #include <mips/trapframe.h>
 #include <cpu.h>
 #include <spl.h>
+#include <pid.h>
+#include <proclist.h>
+#include <synch.h>
 #include <thread.h>
+#include <proc.h>
+#include <kern/wait.h>
+#include <filetable.h>
 #include <current.h>
 #include <vm.h>
 #include <mainbus.h>
@@ -74,6 +80,14 @@ void
 kill_curthread(vaddr_t epc, unsigned code, vaddr_t vaddr)
 {
 	int sig = 0;
+        int result;
+        struct procnode *procnode;
+        struct proc *cur_p;
+        struct thread *cur_t;
+
+	kprintf("Fatal user mode trap %u sig %d (%s, epc 0x%x, vaddr 0x%x)\n",
+		code, sig, trapcodenames[code], epc, vaddr);
+
 
 	KASSERT(code < NTRAPCODES);
 	switch (code) {
@@ -108,13 +122,43 @@ kill_curthread(vaddr_t epc, unsigned code, vaddr_t vaddr)
 		break;
 	}
 
-	/*
-	 * You will probably want to change this.
-	 */
+        procnode = curproc->p_parent;
 
-	kprintf("Fatal user mode trap %u sig %d (%s, epc 0x%x, vaddr 0x%x)\n",
-		code, sig, trapcodenames[code], epc, vaddr);
-	panic("I don't know how to handle this\n");
+        if (procnode != NULL) {
+
+                if (procnode->pn_refcount > 1) {
+                        lock_acquire(procnode->pn_lock);
+                        if (procnode->pn_refcount == 1) {
+                                lock_release(procnode->pn_lock);
+                                result = free_pid(procnode->pid);
+                                if (result) {
+                                        kfree(procnode);
+                                        panic("free_pid in sys__exit failed\n");
+                                }
+                                kfree(procnode);
+                        } else {
+                                procnode->exitcode = _MKWAIT_SIG(sig);
+                                procnode->pn_refcount--;
+                                lock_release(procnode->pn_lock);
+                                V(procnode->waitsem);
+                        }
+                } else {
+                        result = free_pid(procnode->pid);
+                        if (result) {
+                                kfree(procnode);
+                                panic("free_pid in sys__exit failed\n");
+                        }
+                        kfree(procnode);
+                }
+
+        }
+
+        filetable_destroy(curproc->p_filetable);
+        cur_p = curproc;
+        cur_t = curthread;
+        proc_remthread(cur_t);
+        proc_destroy(cur_p);
+        thread_exit();
 }
 
 /*
