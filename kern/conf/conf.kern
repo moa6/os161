@@ -331,6 +331,9 @@ file      thread/threadlist.c
 #
 
 file      proc/proc.c
+file      proc/pid.c
+file      proc/pidlist.c
+file      proc/proclist.c
 file	  proc/filetable.c
 
 #
@@ -378,6 +381,7 @@ file      syscall/loadelf.c
 file      syscall/runprogram.c
 file      syscall/time_syscalls.c
 file      syscall/file_syscalls.c
+file      syscall/proc_syscalls.c
 
 #
 # Startup and initialization
