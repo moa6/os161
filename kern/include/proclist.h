@@ -34,9 +34,10 @@
 #include <lib.h>
 
 struct procnode {
-	struct proc *proc;
-	unsigned exited;
+	pid_t pid;
 	int exitcode;
+	unsigned pn_refcount;
+	struct lock *pn_lock;
 	struct semaphore *waitsem;
 	struct procnode *previous;
 	struct procnode *next;
@@ -51,7 +52,7 @@ struct proclist* proclist_init(void);
 void proclist_destroy(struct proclist* plist);
 bool proclist_isempty(struct proclist* plist);
 struct procnode* proclist_find(struct proclist* plist, pid_t pid);
-int proclist_add(struct proclist* plist, struct proc* process);
+void proclist_add(struct proclist* plist, struct procnode* procnode);
 void proclist_remove(struct proclist *plist, struct procnode* procnode);
 
 #endif

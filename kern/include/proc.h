@@ -59,8 +59,8 @@ struct proc {
 
 	/* add more material here as needed */
 	struct filetable *p_filetable;
+	struct procnode *p_parent;
 	struct proclist *p_children;
-	struct proc *p_parent;
 	pid_t p_pid;
 };
 
