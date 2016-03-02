@@ -101,7 +101,10 @@ sys_open(const_userptr_t filename, int flags, mode_t mode, int* retval)
 	} else if (fd == curproc->p_filetable->filetable_size) {
 		/* Grow file table if the file table is full but has not yet
  * reached maximum capacity */
-		filetable_grow(curproc->p_filetable);
+		result = filetable_grow(curproc->p_filetable);
+		if (result) {
+			return result;
+		}
 	}
 	/* Create a new file table entry */
 	curproc->p_filetable->entries[fd] = file_entry_create();
@@ -133,6 +136,7 @@ int
 sys_close(int fd, int* retval)
 {
         int i;
+	int result;
         int last_fd;
 
 	/* Set the return value to -1 */
@@ -184,11 +188,17 @@ done:
         }
         if (last_fd < 8) {
 		while (curproc->p_filetable->filetable_size > 8) {
-			filetable_shrink(curproc->p_filetable);
+			result = filetable_shrink(curproc->p_filetable);
+			if (result) {
+				return result;
+			}
 		}
 	} else if (last_fd < 16) {
 		while (curproc->p_filetable->filetable_size > 16) {
-			filetable_shrink(curproc->p_filetable);
+			result = filetable_shrink(curproc->p_filetable);
+			if (result) {
+				return result;
+			}
 		}
 	}
 
@@ -429,6 +439,7 @@ sys_lseek(int fd, off_t pos, int whence, int* retval, int* retval_v1)
  */
 int
 sys_dup2 (int oldfd, int newfd, int* retval) {
+	int result;
 	int last_fd;
 	
 	/* Set the return value to -1 */
@@ -458,7 +469,10 @@ oldfd < 0) {
 
 		/* Grow the filetable if necessary */
 		while (newfd >= curproc->p_filetable->filetable_size) {
-			filetable_grow(curproc->p_filetable);						
+			result = filetable_grow(curproc->p_filetable);
+			if (result) {
+				return result;
+			}						
 		}
 
 		/* Update last_fd if necessary */
