@@ -241,23 +241,6 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		vn = curproc->p_filetable->entries[fd]->vn;
 		pos = curproc->p_filetable->entries[fd]->seek;
 
-		/* Create a kernel buffer */
-//		kbuf = kmalloc(buflen*sizeof(void));
-//		if (kbuf == NULL) {
-//			return ENOMEM;
-//		}
-
-	/* Copy data from buf in user space to the kernel buffer */
-//		result = copyin((const_userptr_t)buf, kbuf, buflen);
-//		if (result) {
-//			kfree(kbuf);
-//			return result;
-//		}
-
-		/* Initialize uio and perform the write */
-//		uio_kinit(&iov, &ku, kbuf, buflen, pos, UIO_WRITE);
-
-
 		iov.iov_kbase = buf;
 		iov.iov_len = buflen;
 		ku.uio_iov = &iov;
@@ -271,7 +254,6 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		result = VOP_WRITE(vn, &ku);
 
 		if (result) {
-//			kfree(kbuf);
 			return result;
 		}
 
@@ -281,8 +263,6 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 		curproc->p_filetable->entries[fd]->seek = ku.uio_offset;
 		lock_release(curproc->p_filetable->entries[fd]->f_lock);
-		/* Free the kernel buffer */
-//		kfree(kbuf);
 		/* Set the return value to the number of bytes written and
  * return 0 */
 		*retval = (int)bytes_write;
@@ -330,15 +310,6 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 		/* Obtain the vnode and seek position of the file */
 		vn = curproc->p_filetable->entries[fd]->vn;
 		pos = curproc->p_filetable->entries[fd]->seek;
-		
-		/* Create a kernel buffer */
-//		kbuf = kmalloc(buflen*sizeof(void));
-//		if (kbuf == NULL) {
-//			return ENOMEM;
-//		}		
-
-		/* Initialize a uio and perform the read */
-//		uio_kinit(&iov, &ku, kbuf, buflen, pos, UIO_READ);
 
 		iov.iov_kbase = buf;
 		iov.iov_len = buflen;
@@ -357,22 +328,12 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 			return result;
 		}
 
-		/* Copy the data from the kernel buffer to buf in user space */
-//		result = copyout(kbuf, (userptr_t)buf, buflen);
-//		if (result) {
-//			kfree(kbuf);
-//			return result;
-//		}
-
 		/* Calculate the number of bytes read */
 		bytes_read = ku.uio_offset - pos;
 		/* Update the seek position */
 		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 		curproc->p_filetable->entries[fd]->seek = ku.uio_offset;
 		lock_release(curproc->p_filetable->entries[fd]->f_lock);
-		/* Free the kernel buffer */
-//		kfree(kbuf);
-
 		/* Set the return value to the number of bytes read and return 0 */
 		*retval = (int)bytes_read;
 		return 0;
@@ -495,18 +456,22 @@ oldfd < 0) {
 			*retval = -1;
 		}
 
-		/* Set oldfd and newfd to point to the same file entry */
+		/* Grow the filetable if necessary */
+		while (newfd >= curproc->p_filetable->filetable_size) {
+			filetable_grow(curproc->p_filetable);						
+		}
+
+		/* Update last_fd if necessary */
+		if (newfd > oldfd) {
+			curproc->p_filetable->last_fd = newfd;
+		}
+
 		curproc->p_filetable->entries[newfd] =
 curproc->p_filetable->entries[oldfd];
 		
 		lock_acquire(curproc->p_filetable->entries[newfd]->f_lock);
 		curproc->p_filetable->entries[newfd]->f_refcount++;
-		lock_release(curproc->p_filetable->entries[newfd]->f_lock);
-	
-		/* Updated last_fd is necessary */
-		if (newfd > last_fd) {
-			curproc->p_filetable->last_fd = newfd;
-		}
+		lock_release(curproc->p_filetable->entries[newfd]->f_lock);	
 
 		/* Set the return value to newfd and return 0 */
 		*retval = newfd;
