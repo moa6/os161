@@ -83,7 +83,12 @@ sys_fork(struct trapframe* tf, pid_t* retval) {
         spinlock_release(&curproc->p_lock);
 
 	p_as = proc_getas();
-	as_copy(p_as, &cp_as);
+
+	result = as_copy(p_as, &cp_as);
+	if (result) {
+		return result;
+	}
+
 	cp_filetable = filetable_copy(curproc->p_filetable);
 	if (cp_filetable == NULL) {
 		return ENOMEM;
@@ -94,47 +99,6 @@ sys_fork(struct trapframe* tf, pid_t* retval) {
 	cp_tf->tf_v0 = 0;
 	cp_tf->tf_a3 = 0;
 	cp_tf->tf_epc+=4;
-/*
-	cp_tf.tf_vaddr = tf->tf_vaddr;
-        cp_tf.tf_status = tf->tf_status;
-        cp_tf.tf_cause = tf->tf_cause;
-        cp_tf.tf_lo = tf->tf_lo;
-        cp_tf.tf_hi = tf->tf_hi;
-        cp_tf.tf_ra = tf->tf_ra;         
-        cp_tf.tf_at = tf->tf_at;         
-        cp_tf.tf_v0 = 0;     
-        cp_tf.tf_v1 = tf->tf_v1;    
-        cp_tf.tf_a0 = tf->tf_a0;
-        cp_tf.tf_a1 = tf->tf_a1;
-        cp_tf.tf_a2 = tf->tf_a2;
-        cp_tf.tf_a3 = 0;
-        cp_tf.tf_t0 = tf->tf_t0;
-        cp_tf.tf_t1 = tf->tf_t1;
-        cp_tf.tf_t2 = tf->tf_t2;
-        cp_tf.tf_t3 = tf->tf_t3;
-        cp_tf.tf_t4 = tf->tf_t4;
-        cp_tf.tf_t5 = tf->tf_t5;
-        cp_tf.tf_t6 = tf->tf_t6;
-        cp_tf.tf_t7 = tf->tf_t7;
-        cp_tf.tf_s0 = tf->tf_s0;
-        cp_tf.tf_s1 = tf->tf_s1;
-        cp_tf.tf_s2 = tf->tf_s2;
-        cp_tf.tf_s3 = tf->tf_s3;
-        cp_tf.tf_s4 = tf->tf_s4;
-        cp_tf.tf_s5 = tf->tf_s5;
-        cp_tf.tf_s6 = tf->tf_s6;
-        cp_tf.tf_s7 = tf->tf_s7;
-        cp_tf.tf_t8 = tf->tf_t8;
-        cp_tf.tf_t9 = tf->tf_t9;
-        cp_tf.tf_k0 = tf->tf_k0;        
-        cp_tf.tf_k1 = tf->tf_k1;       
-        cp_tf.tf_gp = tf->tf_gp;
-//        cp_tf.tf_sp = tf->tf_sp;
-        cp_tf.tf_s8 = tf->tf_s8;
-        cp_tf.tf_epc = tf->tf_epc + 4;   
-*/
-
-
 
 	argv = kmalloc(2*sizeof(void*));
 	argv[0] = cp_tf;
@@ -145,12 +109,6 @@ sys_fork(struct trapframe* tf, pid_t* retval) {
                         enter_forked_process ,
                         argv, 2);
 
-/*
-	result = thread_fork(cp_t_name ,
-			child_proc ,
-			enter_forked_process ,
-			argv, 2);
-*/
         if (result) {
                 proc_destroy(child_proc);
                 return result;
@@ -262,7 +220,10 @@ void sys__exit(int exitcode) {
 		}
 
 	} else {
-		free_pid(curproc->p_pid);
+			result = free_pid(curproc->p_pid);
+			if (result) {
+				panic("free_pid in sys__exit failed\n");
+			}
 	}
 
 	filetable_destroy(curproc->p_filetable);
