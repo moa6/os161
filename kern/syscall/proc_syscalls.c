@@ -153,29 +153,46 @@ sys_waitpid(pid_t pid, userptr_t status, int options, pid_t* retval) {
 			return 0;
 
 		} else if (childnode->pn_refcount == 1) {
-			free_pid(pid);
-			*retval = childnode->exitcode;
+			*kbuf = childnode->exitcode;
+			
+			if (status != NULL) {
+				result = copyout(kbuf, status, sizeof(*kbuf));
+				if (result) {
+					kfree(kbuf);
+					return result;
+				}
+		 	}
+
 			proclist_remove(curproc->p_children, childnode);
+			kfree(kbuf);			
+
+			result = free_pid(pid);
+			if (result) {
+				return result;				
+			}
+
+			*retval = pid;
 			return 0;
 
 		} else {
 			P(childnode->waitsem);
-			KASSERT(childnode->pn_refcount == 1);
 			*kbuf = childnode->exitcode;
 
 			if (status != NULL) {
 				result = copyout(kbuf, status, sizeof(*kbuf));
 				if (result) {
-					proclist_remove(curproc->p_children, childnode);
 					kfree(kbuf);
-					free_pid(pid);
 					return result;
 				}
 		 	}
 
 			proclist_remove(curproc->p_children, childnode);
 			kfree(kbuf);
-			free_pid(pid);		
+
+			result = free_pid(pid);		
+			if (result) {
+				return result;
+			}
 	
 			*retval = pid;
 			return 0;
@@ -205,7 +222,7 @@ void sys__exit(int exitcode) {
 				}
 				kfree(procnode);
 			} else {
-				procnode->exitcode = _MKWAIT_EXIT(exitcode);
+				procnode->exitcode = _MKWAIT_EXIT(exitcode);				
 				procnode->pn_refcount--;
 				lock_release(procnode->pn_lock);
 				V(procnode->waitsem);
