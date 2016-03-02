@@ -268,6 +268,9 @@ proc_create_runprogram(const char *name)
 	spinlock_release(&curproc->p_lock);
 
 	newproc->p_filetable = filetable_create();
+	if (newproc->p_filetable == NULL) {
+		return NULL;
+	}
 
 	return newproc;
 }
