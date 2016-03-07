@@ -197,12 +197,9 @@ filetable_destroy(struct filetable *filetable) {
 	KASSERT(filetable != NULL);
 	
 	int i;
-	int retval;
 
 	for (i=0; i<=filetable->last_fd; i++) {
-		if (filetable->entries[i] != NULL) {
-			sys_close(i, &retval);
-		}
+		KASSERT(filetable->entries[i] == NULL);
 	}
 	
 	kfree(filetable->entries);
