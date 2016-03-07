@@ -186,8 +186,8 @@ proc_destroy(struct proc *proc)
 	threadarray_cleanup(&proc->p_threads);
 	spinlock_cleanup(&proc->p_lock);
 
-//	filetable_destroy(proc->p_filetable);
-//	proclist_destroy(proc->p_children);
+	filetable_destroy(proc->p_filetable);
+	proclist_destroy(proc->p_children);
 	
 	kfree(proc->p_name);
 	kfree(proc);
