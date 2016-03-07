@@ -120,6 +120,8 @@ proclist_destroy(struct proclist* plist) {
 			}
 		}
 	}
+
+	kfree(plist);
 }
 
 
