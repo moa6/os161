@@ -280,6 +280,11 @@ filetable_shrink(struct filetable *filetable) {
 	return 0;
 }
 
+/*
+ * filetable_copy
+ *
+ * Creates a new copy of the filetable
+ */
 struct filetable*
 filetable_copy(struct filetable *filetable) {
 	KASSERT(filetable != NULL);
@@ -290,28 +295,37 @@ filetable_copy(struct filetable *filetable) {
 	struct file_entry **dest_entries;	
 
 	dest_size = filetable->filetable_size;
+
+	/* Allocate a new filetable named dest_filetable */
 	dest_filetable = kmalloc(sizeof(*dest_filetable));
-//	dest_filetable = filetable_create();
 	if (dest_filetable == NULL) {
 		return NULL;
 	}
 	
+	/* Allocate the array of filetable entries */
 	dest_entries = kmalloc(dest_size*sizeof(struct filetable_entry*));
 	if (dest_entries == NULL) {
 		kfree(dest_filetable);
 		return NULL;
 	}
 
+	/* Initialize the array of filetable entries to NULL */
 	for(i=0; i<dest_size; i++) {
 		dest_entries[i] = NULL;
 	}	
 
+	/* Copy the filetable entries to the new filetable */
 	memcpy(dest_entries, filetable->entries, dest_size*sizeof(struct
 filetable_entry*));
 	dest_filetable->entries = dest_entries;
+
+	/* Copy the other fields of the original filetable into the new
+	 * filetable */
 	dest_filetable->filetable_size = dest_size;
 	dest_filetable->last_fd = filetable->last_fd;
 
+	/* Increment the reference count of each filetable object, now that the
+	 * objects are shared between two filetables */
 	for (i=0; i <= dest_filetable->last_fd; i++) {
 		if (dest_filetable->entries[i] != NULL) {
 			lock_acquire(dest_filetable->entries[i]->f_lock);
@@ -319,5 +333,7 @@ filetable_entry*));
 			lock_release(dest_filetable->entries[i]->f_lock);
 		}
 	}
+
+	/* Return the new filetable */
 	return dest_filetable;
 }
