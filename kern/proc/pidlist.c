@@ -34,6 +34,11 @@
 #include <kern/errno.h>
 #include <pidlist.h>
 
+/*
+ * pidlist_init
+ *
+ * Create and initialize the pidlist
+ */
 struct pidlist *
 pidlist_init(void) {
 	struct pidlist *plist;
@@ -48,42 +53,66 @@ pidlist_init(void) {
 	return plist;
 }
 
+/*
+ * pidlist_isempty
+ *
+ * Determines if the pidlist is empty 
+ */
 bool
 pidlist_isempty(struct pidlist* plist) {
 	KASSERT(plist != NULL);
 
 	if (plist->head == NULL && plist->tail == NULL) {
+		/* If the head and tail of the pidlist are NULL, the pidlist is
+ 		 * empty */
 		return true;
 	} else {
 		return false;
 	}
 }
 
+/*
+ * pidlist_find
+ *
+ * Finds the pidnode in the pidlist which contains the pid
+ */
 bool
 pidlist_find(struct pidlist* plist, pid_t pid) {
 	struct pidnode *itvar;
 
 	if (plist == NULL) {
+		/* Return false if there is no pidlist */
 		return false;
 
 	} else if (pidlist_isempty(plist)) {
+		/* Return false if the pidlist is empty */
 		return false;
 
 	} else if (pid < PID_MIN || pid > PID_MAX) {
+		/* Return false if pid is not in a valid range */
 		return false;
 
 	} else {
+		/* Iterate through each pidnode in the pidlist until we find a
+		 * procnode containing the pid */
 		for (itvar = plist->head; itvar != NULL; itvar = itvar->next) {
 			if (itvar->pid == pid) {
 				return true;
 			}
 		}
 
+		/* Return false if we iterated through the entire pidlist */
 		return false;
 	}
 }
 
-int
+/*
+ * pidlist_remhead
+ *
+ * Returns the pid of the pidnode at the head of the pidlist.  The head of the
+ * pidlist is destroyed. 
+ */
+pid_t
 pidlist_remhead(struct pidlist* plist) {
 	KASSERT(plist != NULL);
 	KASSERT(plist->head != NULL);
@@ -103,6 +132,11 @@ pidlist_remhead(struct pidlist* plist) {
 	return pid;
 }
 
+/*
+ * pidlist_addtail
+ *
+ * Adds a new pidnode with pid to the end of the pidlist
+ */
 int
 pidlist_addtail(struct pidlist* plist, int pid) {
 	KASSERT(plist != NULL);
@@ -136,4 +170,29 @@ pidlist_addtail(struct pidlist* plist, int pid) {
 	}
 
 	return 0;
+}
+
+/*
+ * pidlist_clean
+ *
+ * Cleans the pidlist
+ */
+void
+pidlist_clean(struct pidlist* plist) {
+	KASSERT(plist != NULL);
+
+	struct pidnode *itvar;
+	struct pidnode *p_rem;
+
+	itvar = plist->head;
+
+	/* Iterate through the entire pidlist and free the pidnodes */
+	while (itvar != NULL) {
+		p_rem = itvar;
+		itvar = itvar->next;
+		kfree(p_rem);
+	}
+
+	plist->head = NULL;
+	plist->tail = NULL;
 }

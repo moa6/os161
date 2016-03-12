@@ -52,7 +52,7 @@
 #include <addrspace.h>
 #include <vnode.h>
 #include <limits.h>
-#include <proclist.h>
+#include <procnode_list.h>
 #include <filetable.h>
 /*
  * The process for the kernel; this holds all the kernel-only threads.
@@ -91,7 +91,7 @@ proc_create(const char *name)
 
 	proc->p_filetable = NULL;
 
-	proc->p_children = proclist_init();
+	proc->p_children = procnode_list_create();
 	if (proc->p_children == NULL) {
 		return NULL;
 	}
@@ -187,7 +187,7 @@ proc_destroy(struct proc *proc)
 	spinlock_cleanup(&proc->p_lock);
 
 	filetable_destroy(proc->p_filetable);
-	proclist_destroy(proc->p_children);
+	procnode_list_destroy(proc->p_children);
 	
 	kfree(proc->p_name);
 	kfree(proc);
