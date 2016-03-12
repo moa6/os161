@@ -33,20 +33,39 @@
 #include <types.h>
 #include <lib.h>
 
+/* pidnode struct:
+ * The pidnode struct contains a pid which can be assigned to a newly created
+ * user process.
+ */
 struct pidnode {
-	pid_t pid;
-	struct pidnode *next;
+	pid_t pid; 		/* pid available to be assigned */
+	struct pidnode *next;   /* Pointer to the next pidnode in a pidlist */
 };
 
+/* pidlist struct:
+ * A list of pidnodes
+ */
 struct pidlist {
-	struct pidnode *head;
-	struct pidnode *tail;
+	struct pidnode *head;	/* Head of the pidlist */
+	struct pidnode *tail;	/* Tail of the pidlist */
 };
 
+/* Create and initialize a pidlist */
 struct pidlist* pidlist_init(void);
+
+/* Checks if a pidlist is empty of pidnodes */
 bool pidlist_isempty(struct pidlist* plist);
+
+/* Determines if a procnode containing pid exists in a pidlist */
 bool pidlist_find(struct pidlist *plist, pid_t pid);
-int pidlist_remhead(struct pidlist* plist);
+
+/* Returns the pid from the head of the pidlist.  The head of the pidlist is
+ * destroyed. */
+pid_t pidlist_remhead(struct pidlist* plist);
+
+/* Add pid to the pidlist */
 int pidlist_addtail(struct pidlist* plist, int pid);
 
+/* Clean up the pidlist */
+void pidlist_clean(struct pidlist *plist);
 #endif

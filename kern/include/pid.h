@@ -34,27 +34,42 @@
 #include <lib.h>
 #include <pidlist.h>
 
-/*
- * pid table structure
+/* pidtable struct:
+ * The pidtable struct is a struct used by processes to obtain their PIDs.
  */
 struct pidtable {
-	struct lock *pid_lock;
-	pid_t last_pid;
-	struct pidlist *freed_pids;
+	struct lock *pid_lock;		/* Lock to ensure that PIDs are obtained
+					   and freed atomically */
+
+	unsigned num_pidsissued;	/* Total number of PIDs which have ever
+					   been issued */
+
+	unsigned num_pidsfreed;		/* Total number of PIDs which have been
+					   freed */
+
+	pid_t last_pid;			/* The maximum PID value issued thus far
+					 */
+
+	struct pidlist *freed_pids;	/* A pidlist of PIDs which have been
+					   freed */
 };
 
+/* The pidtable is a global structure since it needs to be accessed by all user
+ * processes. */
 extern struct pidtable *pidtable;
 
-/*
- * Prototypes for pid table functions
- */
-
+/* Initialize the pidtable upon bootup */
 void pidtable_bootstrap(void);
 
+/* Determine if a user process with pid is still active */
 bool find_pid(pid_t pid);
 
+/* Used to assign PIDs to newly created user processes */
 int get_pid(pid_t* pid);
 
+/* Used to free the PID of an exiting user process.  The freed PID can then be
+ * used again by a newly created user process.
+ */
 int free_pid(pid_t pid);
 
 #endif
