@@ -38,7 +38,7 @@
 #include <thread.h>
 #include <proc.h>
 #include <current.h>
-#include <proclist.h>
+#include <procnode_list.h>
 #include <vfs.h>
 #include <sfs.h>
 #include <syscall.h>
@@ -93,7 +93,9 @@ cmd_progthread(void *ptr, unsigned long nargs)
 	if (result) {
 		kprintf("Running program %s failed: %s\n", args[0],
 			strerror(result));
-		return;
+//		return;
+
+		sys__exit(1);
 	}
 
 	/* NOTREACHED: runprogram only returns on error. */
@@ -131,13 +133,13 @@ common_prog(int nargs, char **args)
 		return ENOMEM;
 	}
 
-	procnode = procnode_init();
+	procnode = procnode_create();
 	if (procnode == NULL) {
 		return ENOMEM;
 	}
 
 	procnode->pid = proc->p_pid;
-	proclist_add(curproc->p_children, procnode);
+	procnode_list_add(curproc->p_children, procnode);
 	proc->p_parent = procnode;
 
 	result = thread_fork(args[0] /* thread name */,
