@@ -44,6 +44,144 @@
 #include <kern/errno.h>
 #include <filetable.h>
 
+
+int
+execv(char *progname, char **user_arg)
+{
+        struct addrspace *as;
+        struct vnode *v;
+        vaddr_t entrypoint, stackptr;
+        int result;
+
+//acquire lock
+        lock_acquire(execv);
+
+//copy agrument to store temporarily
+
+        if (program == NULL || user_arg == NULL ) {
+                //kprintf("EXECV- Argument is a null pointer\n");
+                return EFAULT;
+        }
+
+        char *progname;
+        size_t size;
+
+        progname = (char *) kmalloc(sizeof(char) * MAX_DEF);
+
+        result = copyinstr((const_userptr_t) program, progname, MAX_DEF, &size);
+
+        if (result) {
+                //fail message
+                kfree(progname);
+                return EFAULT;
+        }
+
+        if (size == 1) {
+                //kprintf("Empty Program Name\n");
+                kfree(progname);
+                return EINVAL;
+        }
+
+        char **args = (char **) kmalloc(sizeof(char **));
+    result = copyin((const_userptr_t) user_arg, args, sizeof(char **));
+
+        if (result) {
+                //failure
+                kfree(progname);
+                kfree(args);
+                return EFAULT;
+        }
+
+
+        //allocate memory for argument
+        while (user_arg[i] != NULL ) {
+                args[i] = (char *) kmalloc(sizeof(char) * MAX_DEF);
+                result = copyinstr((const_userptr_t) user_arg[i], args[i], MAX_DEF,
+                                &size);
+                if (result) {
+                        kfree(progname);
+                        kfree(args);
+                        return EFAULT;
+                }
+                i++;
+        }
+        args[i] = NULL;
+
+
+
+
+        /* Open the file. */
+        result = vfs_open(progname, O_RDONLY, 0, &v);
+        if (result) {
+                kfree(progname);
+                kfree(args);
+                return result;
+        }
+
+        /* We should be a new process. */
+        KASSERT(proc_getas() == NULL);
+
+        /* Create a new address space. */
+        as = as_create();
+        if (as == NULL) {
+                kfree(progname);
+                kfree(args);
+             return result;
+        }
+
+        /* We should be a new process. */
+        KASSERT(proc_getas() == NULL);
+
+        /* Create a new address space. */
+        as = as_create();
+        if (as == NULL) {
+                kfree(progname);
+                kfree(args);
+                vfs_close(v);
+                return ENOMEM;
+        }
+
+        /* Switch to it and activate it. */
+        proc_setas(as);
+
+      as_activate();
+
+        /* Load the executable. */
+        result = load_elf(v, &entrypoint);
+        if (result) {
+                /* p_addrspace will go away when curproc is destroyed */
+                kfree(progname);
+                kfree(args);
+                vfs_close(v);
+                return result;
+        }
+
+        /* Done with the file now. */
+        vfs_close(v);
+
+        /* Define the user stack in the address space */
+        result = as_define_stack(as, &stackptr);
+        if (result_end) {
+
+                kfree(progname);
+                kfree(args);
+                return result;
+        }
+
+/////Copy out the temporary stored argument to address create stack//
+///not implemented
+
+        lock_release(execv);
+
+        /* Warp to user mode. */
+        enter_new_process(0 /*argc*/, NULL /*userspace addr of argv*/,
+                          NULL /*userspace addr of environment*/,
+                          stackptr, entrypoint);
+
+        /* enter_new_process does not return. */
+        panic("enter_new_process returned\n");
+        return EINVAL;
+
 int
 sys_fork(struct trapframe* tf, pid_t* retval) {
 	int result;
