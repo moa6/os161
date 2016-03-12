@@ -163,12 +163,16 @@ sizeof(int));
 		err = sys_fork(tf, &retval);
 		break;
 
+	    case SYS_execv:
+		err = sys_execv((const_userptr_t)tf->tf_a0,
+(userptr_t*)tf->tf_a1, &retval);
+		break;
+
 	    case SYS_getpid:
 		err = sys_getpid(&retval);
 		break;
 
 	    case SYS_waitpid:
-//		tf->tf_v0 = 3;
 		err = sys_waitpid(tf->tf_a0, (userptr_t)tf->tf_a1, tf->tf_a2,
 &retval);
 		break;
@@ -215,11 +219,6 @@ sizeof(int));
 
 /*
  * Enter user mode for a newly forked process.
- *
- * This function is provided as a reminder. You need to write
- * both it and the code that calls it.
- *
- * Thus, you can trash it and do things another way if you prefer.
  */
 void
 enter_forked_process(void *ptr, unsigned long nargs)
@@ -227,13 +226,27 @@ enter_forked_process(void *ptr, unsigned long nargs)
 	KASSERT(nargs == 2);
 
 	void** argv = ptr;
+	/* Obtain the pointer to the child process's trapframe */
 	struct trapframe *tf = (struct trapframe *)argv[0];
+
+	/* Need to declare a new trapframe so it gets allocated on the stack.
+	 * Copy the contents of *tf into the new trapframe */
 	struct trapframe newtf = *tf;
+
+	/* Obtain the child process's address space */
 	struct addrspace *newas = (struct addrspace *)argv[1];
 
+	/* Set and activate the child process's address space */
 	proc_setas(newas);
 	as_activate();
+
+	/* Free the trapframe pointer */
 	kfree(tf);
+
+	/* Free the ptr input to eneter_forked_process */
+	kfree(ptr);
+
+	/* Enter into user mode */
 	mips_usermode(&newtf);
 
 }
