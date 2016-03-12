@@ -227,9 +227,11 @@ sys_fork(struct trapframe* tf, pid_t* retval) {
 		return result;
 	}
 
-	cp_filetable = filetable_copy(curproc->p_filetable);
-	if (cp_filetable == NULL) {
-		return ENOMEM;
+	if (curproc->p_filetable != NULL) {
+		cp_filetable = filetable_copy(curproc->p_filetable);
+		if (cp_filetable == NULL) {
+			return ENOMEM;
+		}
 	}
 	child_proc->p_filetable = cp_filetable;
 	cp_tf = kmalloc(sizeof(*tf));

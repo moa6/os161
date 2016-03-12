@@ -333,7 +333,7 @@ file      thread/threadlist.c
 file      proc/proc.c
 file      proc/pid.c
 file      proc/pidlist.c
-file      proc/proclist.c
+file      proc/procnode_list.c
 file	  proc/filetable.c
 
 #

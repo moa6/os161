@@ -67,6 +67,7 @@ int sys_dup2 (int oldfd, int newfd, int* retval);
 int sys___getcwd(void* buf, size_t buflen, int* retval);
 int sys_chdir(const_userptr_t pathname, int* retval);
 int sys_fork(struct trapframe *tf, pid_t* retval);
+int sys_execv(const_userptr_t program, userptr_t* args, int* retval);
 int sys_getpid(pid_t* retval);
 int sys_waitpid(pid_t pid, userptr_t status, int options, pid_t* retval);
 void sys__exit(int exitcode);

@@ -35,6 +35,7 @@
 #include <syscall.h>
 #include <filetable.h>
 #include <kern/fcntl.h>
+#include <kern/errno.h>
 
 /*
  * file_entry_create
@@ -196,12 +197,9 @@ filetable_destroy(struct filetable *filetable) {
 	KASSERT(filetable != NULL);
 	
 	int i;
-	int retval;
 
 	for (i=0; i<=filetable->last_fd; i++) {
-		if (filetable->entries[i] != NULL) {
-			sys_close(i, &retval);
-		}
+		KASSERT(filetable->entries[i] == NULL);
 	}
 	
 	kfree(filetable->entries);
@@ -215,7 +213,7 @@ filetable_destroy(struct filetable *filetable) {
  *
  * filetable_grow doubles the size of the file table/
  */
-void
+int
 filetable_grow(struct filetable *filetable) {
 	KASSERT(filetable != NULL);
 
@@ -232,7 +230,7 @@ filetable_grow(struct filetable *filetable) {
 	/* Re-size the file table */
 	temp = kmalloc(new_size*sizeof(struct filetable_entry*));
 	if (temp == NULL) {
-		panic("filetable_grow: kmalloc failed\n");
+		return ENOMEM;
 	}
 
 	for (i=0; i<new_size; i++) {
@@ -243,6 +241,7 @@ filetable_grow(struct filetable *filetable) {
 	kfree(filetable->entries);
 	filetable->entries = temp;
 	filetable->filetable_size = new_size;
+	return 0;
 }
 
 /*
@@ -250,7 +249,7 @@ filetable_grow(struct filetable *filetable) {
  *
  * filetable_shrink halves the size of the file table.
  */
-void
+int
 filetable_shrink(struct filetable *filetable) {
 	KASSERT(filetable != NULL);
 
@@ -267,7 +266,7 @@ filetable_shrink(struct filetable *filetable) {
 	/* Re-size of the file table */
 	temp = kmalloc(new_size*sizeof(struct filetable_entry*));
 	if (temp == NULL) {
-		panic("filetable_shrink: kmalloc failed\n");
+		return ENOMEM;
 	}
 
 	for (i=0; i<new_size; i++) {
@@ -278,6 +277,7 @@ filetable_shrink(struct filetable *filetable) {
 	kfree(filetable->entries);
 	filetable->entries = temp;
 	filetable->filetable_size = new_size;
+	return 0;
 }
 
 struct filetable*

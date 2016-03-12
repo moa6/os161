@@ -37,6 +37,11 @@
 
 struct pidtable *pidtable;
 
+/*
+ * pidtable_bootstrap
+ *
+ * Used to initialize the pidtable upon bootup
+ */
 void
 pidtable_bootstrap(void) {
 	pidtable = kmalloc(sizeof(*pidtable));
@@ -44,6 +49,8 @@ pidtable_bootstrap(void) {
 		panic("pidtable_bootstrap failed\n");
 	}
 
+	pidtable->num_pidsissued = 0;
+	pidtable->num_pidsfreed = 0;
 	pidtable->last_pid = PID_MIN - 1;
 	pidtable->freed_pids = pidlist_init();
 	if (pidtable->freed_pids == NULL) {
@@ -58,45 +65,78 @@ pidtable_bootstrap(void) {
 	}
 }
 
+/*
+ * find_pid
+ *
+ * Used to determine if a user process with PID is still active
+ */
 bool
 find_pid(pid_t pid) {
 	KASSERT(pidtable != NULL);
 
 	lock_acquire(pidtable->pid_lock);
 	if (pid > pidtable->last_pid) {
+		/* If pid is greater than last_pid, then a process with pid does
+		 * not even exist. */
 		lock_release(pidtable->pid_lock);
 		return false;
 	} else if (pidlist_find(pidtable->freed_pids, pid)) {
+		/* If pid is amongst the list of other pids which are not being
+		 * used, then the user process with pid is no longer active. */
 		lock_release(pidtable->pid_lock);
 		return false;	
 	} else {
+		/* The process with pid is still active. */
 		lock_release(pidtable->pid_lock);
 		return true;
 	}
 }
 
+/* 
+ * get_pid
+ *
+ * Used to obtain a pid for a newly created user process
+ */
 int
 get_pid(pid_t* pid) {
 	KASSERT(pidtable != NULL);
 
+	/* If possible, we want to re-use PIDs which have been freed by exited
+	 * user processes.  If no user processes have exited yet, then we get a new pid
+	 * number which has never been issued to any user process before. */
 	if (pidlist_isempty(pidtable->freed_pids)) {
 		if (pidtable->last_pid == PID_MAX) {
+			/* Return ENPROC if the maximum number of processes in
+			 * the system has been reached. */
 			return ENPROC;
 		} else {
+			/* Get a new pid number which has never been assigned
+			 * before */
 			lock_acquire(pidtable->pid_lock);
 			pidtable->last_pid++;
 			*pid = pidtable->last_pid;
+			pidtable->num_pidsissued++;
 			lock_release(pidtable->pid_lock);
 			return 0;
 		}
 	} else {
+		/* Get a pid which has already been used by a now-deceased user
+		 * process. Note that instead of incrementing num_pidsissued, we decrement
+		 * num_pidsfreed.  The number of pids which have ever issued has not changed
+		 * since we are just re-using an old pid.  */
 		lock_acquire(pidtable->pid_lock);
 		*pid = pidlist_remhead(pidtable->freed_pids);
+		pidtable->num_pidsfreed--;
 		lock_release(pidtable->pid_lock);
 		return 0;
 	}
 }
 
+/*
+ * free_pid
+ *
+ * Frees pid so it can be re-used by another user process
+ */
 int
 free_pid(pid_t pid) {
 	KASSERT(pidtable != NULL);
@@ -104,8 +144,28 @@ free_pid(pid_t pid) {
 
 	int result;
 	
+	/* Add pid to the pidlist of other pids which have been freed */
 	lock_acquire(pidtable->pid_lock);
 	result = pidlist_addtail(pidtable->freed_pids, pid);
+	if (result) {
+		return result;
+	}
+	
+	/* Increment num_pidsfreed */
+	pidtable->num_pidsfreed++;
+	KASSERT(pidtable->num_pidsissued >= pidtable->num_pidsfreed);
+
+	/* If the total number of pids which have ever been issued equals to the
+	 * number of pids which have been freed, then the pidtable can be reset as
+	 * though no user processes have ever been created. This ensures that the list
+	 * of freed pids does not continue to grow needlessly.*/
+	if (pidtable->num_pidsissued == pidtable->num_pidsfreed) {
+		pidtable->last_pid = PID_MIN - 1;
+		pidlist_clean(pidtable->freed_pids);
+		pidtable->num_pidsissued = 0;
+		pidtable->num_pidsfreed = 0;
+	}
+
 	lock_release(pidtable->pid_lock);
 	return result;	
 }

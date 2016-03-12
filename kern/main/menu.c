@@ -37,6 +37,8 @@
 #include <clock.h>
 #include <thread.h>
 #include <proc.h>
+#include <current.h>
+#include <procnode_list.h>
 #include <vfs.h>
 #include <sfs.h>
 #include <syscall.h>
@@ -91,7 +93,9 @@ cmd_progthread(void *ptr, unsigned long nargs)
 	if (result) {
 		kprintf("Running program %s failed: %s\n", args[0],
 			strerror(result));
-		return;
+//		return;
+
+		sys__exit(1);
 	}
 
 	/* NOTREACHED: runprogram only returns on error. */
@@ -114,6 +118,8 @@ int
 common_prog(int nargs, char **args)
 {
 	struct proc *proc;
+	struct procnode *procnode;
+	int retval;
 	int result;
 
 #if OPT_SYNCHPROBS
@@ -127,6 +133,15 @@ common_prog(int nargs, char **args)
 		return ENOMEM;
 	}
 
+	procnode = procnode_create();
+	if (procnode == NULL) {
+		return ENOMEM;
+	}
+
+	procnode->pid = proc->p_pid;
+	procnode_list_add(curproc->p_children, procnode);
+	proc->p_parent = procnode;
+
 	result = thread_fork(args[0] /* thread name */,
 			proc /* new process */,
 			cmd_progthread /* thread function */,
@@ -137,11 +152,18 @@ common_prog(int nargs, char **args)
 		return result;
 	}
 
+	
+
 	/*
 	 * The new process will be destroyed when the program exits...
 	 * once you write the code for handling that.
 	 */
 
+	result = sys_waitpid(proc->p_pid, NULL, 0, &retval);
+	if (result) {
+		return result;
+	}
+ 
 	return 0;
 }
 

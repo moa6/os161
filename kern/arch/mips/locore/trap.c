@@ -29,13 +29,14 @@
 
 #include <types.h>
 #include <signal.h>
+#include <limits.h>
 #include <lib.h>
 #include <mips/specialreg.h>
 #include <mips/trapframe.h>
 #include <cpu.h>
 #include <spl.h>
 #include <pid.h>
-#include <proclist.h>
+#include <procnode_list.h>
 #include <synch.h>
 #include <thread.h>
 #include <proc.h>
@@ -79,6 +80,8 @@ static
 void
 kill_curthread(vaddr_t epc, unsigned code, vaddr_t vaddr)
 {
+	int i;
+	int retval;
 	int sig = 0;
         int result;
         struct procnode *procnode;
@@ -122,9 +125,14 @@ kill_curthread(vaddr_t epc, unsigned code, vaddr_t vaddr)
 		break;
 	}
 
+	/* From this point forward, kill_curthread is almost an exact copy of
+	 * sys__exit except that the exitcode is set to indicate that the
+	 * process exited due to a fatal signal. */
+
         procnode = curproc->p_parent;
 
         if (procnode != NULL) {
+		KASSERT(procnode->pid == curproc->p_pid);
 
                 if (procnode->pn_refcount > 1) {
                         lock_acquire(procnode->pn_lock);
@@ -133,7 +141,7 @@ kill_curthread(vaddr_t epc, unsigned code, vaddr_t vaddr)
                                 result = free_pid(procnode->pid);
                                 if (result) {
                                         kfree(procnode);
-                                        panic("free_pid in sys__exit failed\n");
+                                        panic("free_pid in kill_curthread failed\n");
                                 }
                                 kfree(procnode);
                         } else {
@@ -146,14 +154,24 @@ kill_curthread(vaddr_t epc, unsigned code, vaddr_t vaddr)
                         result = free_pid(procnode->pid);
                         if (result) {
                                 kfree(procnode);
-                                panic("free_pid in sys__exit failed\n");
+                                panic("free_pid in kill_curthread failed\n");
                         }
                         kfree(procnode);
                 }
 
+        } else if (curproc->p_pid >= PID_MIN) {
+		result = free_pid(curproc->p_pid);
+                if (result) {
+			panic("free_pid in kill_curthread failed\n");
+		}
         }
 
-        filetable_destroy(curproc->p_filetable);
+        for (i=0; i<=curproc->p_filetable->last_fd; i++) {
+                if (curproc->p_filetable->entries[i] != NULL) {
+                        sys_close(i, &retval);
+                }
+        }
+
         cur_p = curproc;
         cur_t = curthread;
         proc_remthread(cur_t);

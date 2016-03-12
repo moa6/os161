@@ -63,7 +63,7 @@ sys_open(const_userptr_t filename, int flags, mode_t mode, int* retval)
 	/* Set the return value to -1 */
 	*retval = -1;
 	/* Retrieve the last_fd which represents the largest file descriptor
- * being used */
+	 * being used */
 	last_fd = curproc->p_filetable->last_fd;
 
 	char *k_filename = kmalloc(PATH_MAX*sizeof(char));
@@ -86,7 +86,7 @@ sys_open(const_userptr_t filename, int flags, mode_t mode, int* retval)
 	}
 
 	/* Go through the file table to find the smallest available file
- * descriptor */
+	 * descriptor */
 	for(fd=0; fd<curproc->p_filetable->filetable_size; fd++) {
 		if (curproc->p_filetable->entries[fd] == NULL) {
 			break; 
@@ -95,13 +95,16 @@ sys_open(const_userptr_t filename, int flags, mode_t mode, int* retval)
 
 	if (fd == OPEN_MAX) {
 		/* Return EMFILE if the process already has the maximum number
- * of files open */
+		 * of files open */
 		kfree(k_filename);
 		return EMFILE;
 	} else if (fd == curproc->p_filetable->filetable_size) {
 		/* Grow file table if the file table is full but has not yet
- * reached maximum capacity */
-		filetable_grow(curproc->p_filetable);
+		 * reached maximum capacity */
+		result = filetable_grow(curproc->p_filetable);
+		if (result) {
+			return result;
+		}
 	}
 	/* Create a new file table entry */
 	curproc->p_filetable->entries[fd] = file_entry_create();
@@ -133,12 +136,13 @@ int
 sys_close(int fd, int* retval)
 {
         int i;
+	int result;
         int last_fd;
 
 	/* Set the return value to -1 */
         *retval = -1;
 	/* Retrieve last_fd which represents the largest file descriptor being
- * used */
+	 * used */
         last_fd = curproc->p_filetable->last_fd;
 
         if (fd > last_fd || curproc->p_filetable->entries[fd] == NULL || fd < 0)
@@ -147,7 +151,7 @@ sys_close(int fd, int* retval)
                 return EBADF;
         } else if (curproc->p_filetable->entries[fd]->f_refcount > 1) {
 		/* If more than one file descriptor is pointing to the file
- * entry, then decrement f_refcount and set fd pointing to NULL */
+		 * entry, then decrement f_refcount and set fd pointing to NULL */
 		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 
 		if (curproc->p_filetable->entries[fd]->f_refcount > 1) {
@@ -164,7 +168,7 @@ sys_close(int fd, int* retval)
 
 close:
 		/* Call vfs_close which does most of the work of the close
- * system call */
+		 * system call */
                 vfs_close(curproc->p_filetable->entries[fd]->vn);
 		/* Destroy the file table entry and set fd pointing to NULL */ 
                 file_entry_destroy(curproc->p_filetable->entries[fd]);
@@ -184,11 +188,17 @@ done:
         }
         if (last_fd < 8) {
 		while (curproc->p_filetable->filetable_size > 8) {
-			filetable_shrink(curproc->p_filetable);
+			result = filetable_shrink(curproc->p_filetable);
+			if (result) {
+				return result;
+			}
 		}
 	} else if (last_fd < 16) {
 		while (curproc->p_filetable->filetable_size > 16) {
-			filetable_shrink(curproc->p_filetable);
+			result = filetable_shrink(curproc->p_filetable);
+			if (result) {
+				return result;
+			}
 		}
 	}
 
@@ -218,12 +228,11 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 	struct uio ku;
 	struct iovec iov;
 	struct vnode *vn;
-//	void* kbuf;
 
 	/* Set the return value to -1 */
 	*retval = -1;
 	/* Retrieve last_fd which represents the largest available file
- * descriptor */
+	 * descriptor */
 	last_fd = curproc->p_filetable->last_fd;
 	
 	if (fd > last_fd || curproc->p_filetable->entries[fd] == NULL || fd < 0) {
@@ -231,7 +240,7 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		return EBADF;
 	} else {
 		/* Check the openflags of the file.  Return EBADF if the there
- * are no write permissions to the file */
+		 * are no write permissions to the file */
 		openflags = curproc->p_filetable->entries[fd]->openflags;
 		if (openflags == O_RDONLY) {
 			return EBADF;
@@ -240,23 +249,6 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		/* Obtain the vnode and seek position of the file */
 		vn = curproc->p_filetable->entries[fd]->vn;
 		pos = curproc->p_filetable->entries[fd]->seek;
-
-		/* Create a kernel buffer */
-//		kbuf = kmalloc(buflen*sizeof(void));
-//		if (kbuf == NULL) {
-//			return ENOMEM;
-//		}
-
-	/* Copy data from buf in user space to the kernel buffer */
-//		result = copyin((const_userptr_t)buf, kbuf, buflen);
-//		if (result) {
-//			kfree(kbuf);
-//			return result;
-//		}
-
-		/* Initialize uio and perform the write */
-//		uio_kinit(&iov, &ku, kbuf, buflen, pos, UIO_WRITE);
-
 
 		iov.iov_kbase = buf;
 		iov.iov_len = buflen;
@@ -271,7 +263,6 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		result = VOP_WRITE(vn, &ku);
 
 		if (result) {
-//			kfree(kbuf);
 			return result;
 		}
 
@@ -281,10 +272,8 @@ sys_write(int fd, void *buf, size_t buflen, int* retval)
 		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 		curproc->p_filetable->entries[fd]->seek = ku.uio_offset;
 		lock_release(curproc->p_filetable->entries[fd]->f_lock);
-		/* Free the kernel buffer */
-//		kfree(kbuf);
 		/* Set the return value to the number of bytes written and
- * return 0 */
+		 * return 0 */
 		*retval = (int)bytes_write;
 		return 0;
 	}
@@ -309,7 +298,6 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 	struct uio ku;
 	struct iovec iov;
 	struct vnode *vn;
-//	void* kbuf;
 
 	/* Set the return value to -1 */
 	*retval = -1;
@@ -321,7 +309,7 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 		return EBADF;
 	} else {
 		/* Check the open flags of the file.  Return EBADF if there are
- * no read permissions to the file */
+		 * no read permissions to the file */
 		openflags = curproc->p_filetable->entries[fd]->openflags;
 		if (openflags == O_WRONLY) {
 			return EBADF;
@@ -330,15 +318,6 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 		/* Obtain the vnode and seek position of the file */
 		vn = curproc->p_filetable->entries[fd]->vn;
 		pos = curproc->p_filetable->entries[fd]->seek;
-		
-		/* Create a kernel buffer */
-//		kbuf = kmalloc(buflen*sizeof(void));
-//		if (kbuf == NULL) {
-//			return ENOMEM;
-//		}		
-
-		/* Initialize a uio and perform the read */
-//		uio_kinit(&iov, &ku, kbuf, buflen, pos, UIO_READ);
 
 		iov.iov_kbase = buf;
 		iov.iov_len = buflen;
@@ -350,19 +329,10 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 		ku.uio_rw = UIO_READ;
 		ku.uio_space = curproc->p_addrspace;
 
-
 		result = VOP_READ(vn, &ku);
 		if (result) {
-//			kfree(buf);
 			return result;
 		}
-
-		/* Copy the data from the kernel buffer to buf in user space */
-//		result = copyout(kbuf, (userptr_t)buf, buflen);
-//		if (result) {
-//			kfree(kbuf);
-//			return result;
-//		}
 
 		/* Calculate the number of bytes read */
 		bytes_read = ku.uio_offset - pos;
@@ -370,9 +340,6 @@ sys_read(int fd, void *buf, size_t buflen, int* retval)
 		lock_acquire(curproc->p_filetable->entries[fd]->f_lock);
 		curproc->p_filetable->entries[fd]->seek = ku.uio_offset;
 		lock_release(curproc->p_filetable->entries[fd]->f_lock);
-		/* Free the kernel buffer */
-//		kfree(kbuf);
-
 		/* Set the return value to the number of bytes read and return 0 */
 		*retval = (int)bytes_read;
 		return 0;
@@ -422,13 +389,13 @@ sys_lseek(int fd, off_t pos, int whence, int* retval, int* retval_v1)
 
 		    case SEEK_CUR:
 			/* If SEEK_CUR, the new seek position is the current
- position plus pos */
+			   position plus pos */
 			new_seek = old_seek + pos;
 			break;
 
 		    case SEEK_END:
 			/* If SEEK_END, the new seek position is the position at
- * EOF plus pos */
+			 * EOF plus pos */
 			new_seek = file_stat.st_size + pos;
 			break;
 
@@ -440,12 +407,12 @@ sys_lseek(int fd, off_t pos, int whence, int* retval, int* retval_v1)
 
 		if ((file_stat.st_mode & S_IFCHR) == S_IFCHR) {
 			/* Return ESPIPE if file pointed to by fd does not
- * support seeking */
+			 * support seeking */
 			lock_release(curproc->p_filetable->entries[fd]->f_lock);
 			return ESPIPE;
 		} else if (new_seek < 0) {
 			/* Return EINVAL if the new seek position ends up being
- * less than zero */
+			 * less than zero */
 			lock_release(curproc->p_filetable->entries[fd]->f_lock);
 			return EINVAL;
 		} 
@@ -468,6 +435,7 @@ sys_lseek(int fd, off_t pos, int whence, int* retval, int* retval_v1)
  */
 int
 sys_dup2 (int oldfd, int newfd, int* retval) {
+	int result;
 	int last_fd;
 	
 	/* Set the return value to -1 */
@@ -484,29 +452,36 @@ oldfd < 0) {
 		return EBADF;
 	} else if (oldfd == newfd) {
 		/* If oldfd equals newfd, set the return value to newfd and
- * return 0 */
+		 * return 0 */
 		*retval = newfd;
 		return 0;
 	} else {
 		if (curproc->p_filetable->entries[newfd] != NULL) {
 			/* If newfd still points to an open file, close that
- * file */
+			 * file */
 			sys_close(newfd, retval);
 			*retval = -1;
 		}
 
-		/* Set oldfd and newfd to point to the same file entry */
+		/* Grow the filetable if necessary */
+		while (newfd >= curproc->p_filetable->filetable_size) {
+			result = filetable_grow(curproc->p_filetable);
+			if (result) {
+				return result;
+			}						
+		}
+
+		/* Update last_fd if necessary */
+		if (newfd > oldfd) {
+			curproc->p_filetable->last_fd = newfd;
+		}
+
 		curproc->p_filetable->entries[newfd] =
 curproc->p_filetable->entries[oldfd];
 		
 		lock_acquire(curproc->p_filetable->entries[newfd]->f_lock);
 		curproc->p_filetable->entries[newfd]->f_refcount++;
-		lock_release(curproc->p_filetable->entries[newfd]->f_lock);
-	
-		/* Updated last_fd is necessary */
-		if (newfd > last_fd) {
-			curproc->p_filetable->last_fd = newfd;
-		}
+		lock_release(curproc->p_filetable->entries[newfd]->f_lock);	
 
 		/* Set the return value to newfd and return 0 */
 		*retval = newfd;
@@ -540,7 +515,7 @@ sys___getcwd(void* buf, size_t buflen, int* retval)
 			return ENOMEM;
 		}
 		/* Initialize a uio and retrieve the name of the current
- * directory */
+		 * directory */
 		uio_kinit(&iov, &ku, kbuf, buflen, 0, UIO_READ);
 		result = vfs_getcwd(&ku);
 		if (result) {
@@ -549,7 +524,7 @@ sys___getcwd(void* buf, size_t buflen, int* retval)
 		}
 
 		/* Copy the name of the current directory from the kernel buffer
- * to buf in user space */
+		 * to buf in user space */
 		result = copyout(kbuf, (userptr_t)buf, buflen);
 		if (result) {
 			kfree(kbuf);
@@ -559,7 +534,7 @@ sys___getcwd(void* buf, size_t buflen, int* retval)
 		/* Free the kernel buffer */
 		kfree(kbuf);
 		/* Set the return value to length of data retrieved and return 0
- * */
+		 */
 		*retval = ku.uio_offset;
 		return 0;
 	}

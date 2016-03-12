@@ -34,10 +34,15 @@
 #include <current.h>
 #include <synch.h>
 #include <kern/errno.h>
-#include <proclist.h>
+#include <procnode_list.h>
 
+/*
+ * procnode_create
+ *
+ * Creates and initialize a new procnode
+ */
 struct procnode *
-procnode_init(void) {
+procnode_create(void) {
 	struct procnode *procnode;
 
 	procnode = kmalloc(sizeof(*procnode));
@@ -57,117 +62,193 @@ procnode_init(void) {
 		return NULL;
 	}
 
+	/* Set the reference count to be 2 since the parent process and the
+	 * child process initially both point to it. */
 	procnode->pn_refcount = 2;
+
+	/* Set the pid field to fall outside of the range of possible user
+	 * process pids */
 	procnode->pid = PID_MIN - 1;
+
+	/* Initialize the exitcode field to 0 */
 	procnode->exitcode = 0;
+
 	procnode->next = NULL;
 	procnode->previous = NULL;
 	return procnode;
 }
 
-struct proclist *
-proclist_init(void) {
-	struct proclist *plist;
+/*
+ * procnode_list_create
+ *
+ * Creates a procnode_list
+ */
+struct procnode_list *
+procnode_list_create(void) {
+	struct procnode_list *pn_list;
 
-	plist = kmalloc(sizeof(*plist));
-	if (plist == NULL) {
+	pn_list = kmalloc(sizeof(*pn_list));
+	if (pn_list == NULL) {
 		return NULL;
 	}
 
-	plist->head = NULL;
-	return plist;
+	pn_list->head = NULL;
+	return pn_list;
 }
 
+/*
+ * procnode_list_isempty
+ *
+ * Checks if a procnode_list is empty
+ */
 bool
-proclist_isempty(struct proclist* plist) {
-	KASSERT(plist != NULL);
+procnode_list_isempty(struct procnode_list* pn_list) {
+	KASSERT(pn_list != NULL);
 
-	if (plist->head == NULL) {
+	if (pn_list->head == NULL) {
 		return true;
 	} else {
 		return false;
 	}
 }
 
+/*
+ * procnode_list_desetroy
+ *
+ * Destroys the procnode_list
+ */
 void
-proclist_destroy(struct proclist* plist) {
-	KASSERT(plist != NULL);
+procnode_list_destroy(struct procnode_list* pn_list) {
+	KASSERT(pn_list != NULL);
 
 	struct procnode *itvar;
 	struct procnode *rem_procnode;
 
-	if (!proclist_isempty(plist)) {
-		itvar = plist->head;
+	if (!procnode_list_isempty(pn_list)) {
+		itvar = pn_list->head;
 
 		while (itvar != NULL) {
 			KASSERT(itvar->pn_refcount != 0);
 
 			if (itvar->pn_refcount == 1) {
+				/* If the reference count of the procnode is
+				 * equal to 1, the current process is the last
+				 * one to be pointing to that procnode.  So the
+				 * current process is free to destroy it. */
 				rem_procnode = itvar;
 				itvar = itvar->next;
-				proclist_remove(plist, rem_procnode);
+				procnode_destroy(rem_procnode);
 			} else {
 				lock_acquire(itvar->pn_lock);
 				if (itvar->pn_refcount == 1) {
+					/* While acquiring the procnode lock,
+					 * the other process pointing to the
+					 * procnode has exited.  Therefore, the
+					 * current process is free to destroy
+					 * it. */
 					lock_release(itvar->pn_lock);
 					rem_procnode = itvar;
 					itvar = itvar->next;
-					proclist_remove(plist, rem_procnode);
+					procnode_destroy(rem_procnode);
 				} else {
+					/* If we reached this point in
+					 * procnode_list_destroy, there is
+					 * another process pointing to the
+					 * procnode.  Therefore, we don't
+					 * destroy the procnode.  We instead
+					 * decrement the procnode's reference
+					 * counter. */
 					itvar->pn_refcount--;
 					lock_release(itvar->pn_lock);
 				}
 			}
 		}
 	}
+
+	/* Free the procnode_list */
+	kfree(pn_list);
 }
 
+/*
+ * procnode_destroy
+ *
+ * Destroys the procnode
+ */
+void
+procnode_destroy(struct procnode* procnode) {
+	lock_destroy(procnode->pn_lock);
+	sem_destroy(procnode->waitsem);
+	kfree(procnode);
+}
 
+/*
+ * procnode_list_find
+ *
+ * Finds the procnode node in the procnode_list which contains the pid
+ */
 struct procnode *
-proclist_find(struct proclist* plist, pid_t pid) {
+procnode_list_find(struct procnode_list* pn_list, pid_t pid) {
 	struct procnode *itvar;
 
-	if (plist == NULL) {
+	if (pn_list == NULL) {
+		/* Return NULL if the procnode list does not exist */
 		return NULL;
 
-	} else if (proclist_isempty(plist)) {
+	} else if (procnode_list_isempty(pn_list)) {
+		/* Return NULL if the procnode list is empty */
 		return NULL;
 	
 	} else if (pid < PID_MIN || pid > PID_MAX) {
+		/* Return NULL if the pid falls outside the range of possible
+		 * user process pids */
 		return NULL;
 
 	} else { 
-		for (itvar = plist->head; itvar != NULL; itvar = itvar->next) {
+		/* Iterate through each procnode in the procnode list until we
+		 * find a procnode containing the pid */
+		for (itvar = pn_list->head; itvar != NULL; itvar = itvar->next) {
 			if (itvar->pid == pid) {
 				return itvar;
 			}	
 		}
 
+		/* Return NULL if we iterated through the entire procnode list
+		 */
 		return NULL;
 	}
 }
 
+/*
+ * procnode_list_add
+ *
+ * Adds a new procnode to the head of the procnode_list
+ */
 void
-proclist_add(struct proclist* plist, struct procnode* procnode) {
-	KASSERT(plist != NULL);
+procnode_list_add(struct procnode_list* pn_list, struct procnode* procnode) {
+	KASSERT(pn_list != NULL);
 	KASSERT(procnode != NULL);
 
-	procnode->next = plist->head;
+	procnode->next = pn_list->head;
 	
-	if (plist->head != NULL) {
-		plist->head->previous = procnode;
+	if (pn_list->head != NULL) {
+		pn_list->head->previous = procnode;
 	}
 
-	plist->head = procnode;
+	pn_list->head = procnode;
 }
 
+/*
+ * procnode_list_remove
+ *
+ * Removes and destroys a procnode from a procnode_list
+ */
 void
-proclist_remove(struct proclist* plist, struct procnode* procnode) {
-	KASSERT(plist != NULL);
+procnode_list_remove(struct procnode_list* pn_list, struct procnode* procnode) {
+	KASSERT(pn_list != NULL);
 	KASSERT(procnode != NULL);
 	
-	if (plist->head == procnode) {
-		plist->head = procnode->next;
+	if (pn_list->head == procnode) {
+		pn_list->head = procnode->next;
 	}
 
 	if (procnode->previous != NULL) {
@@ -182,3 +263,4 @@ proclist_remove(struct proclist* plist, struct procnode* procnode) {
 	sem_destroy(procnode->waitsem);
 	kfree(procnode);
 }
+

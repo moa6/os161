@@ -68,9 +68,9 @@ struct filetable *filetable_create(void);
 
 void filetable_destroy(struct filetable *filetable);
 
-void filetable_grow(struct filetable *filetable);
+int filetable_grow(struct filetable *filetable);
 
-void filetable_shrink(struct filetable *filetable);
+int filetable_shrink(struct filetable *filetable);
 
 struct filetable *filetable_copy(struct filetable *filetable);
 

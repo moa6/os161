@@ -57,11 +57,14 @@ struct proc {
 	/* VFS */
 	struct vnode *p_cwd;		/* current working directory */
 
-	/* add more material here as needed */
-	struct filetable *p_filetable;
-	struct procnode *p_parent;
-	struct proclist *p_children;
-	pid_t p_pid;
+	struct filetable *p_filetable; 	/* process filetable */
+	struct procnode *p_parent;	/* procnode shared by process's parent
+					 */
+
+	struct procnode_list *p_children; /* procnode list which tracks the
+					     process's children */
+
+	pid_t p_pid; /* Process's PID.  PID is only assigned to user processes.  */
 };
 
 /* This is the process structure for the kernel and for kernel-only threads. */
