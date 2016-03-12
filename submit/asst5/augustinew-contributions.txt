@@ -1,0 +1,12 @@
+1) Worked together with Mohammed to come up with the code needed to assign PIDs
+to user processes
+
+2) Worked together with Mohammed  to implement sys_fork
+
+3) Implemented sys_waitpid and sys__exit
+
+4) Modified Mohammed's initial implementation of sys_execv so that it can pass
+badcall and bigexec
+
+5) Fixed memory leaks, cleaned up the code, and ensured code was properly
+commented
