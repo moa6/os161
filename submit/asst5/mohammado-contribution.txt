@@ -1,0 +1,10 @@
+1) Worked together with Augustine to come up with the code needed to assign PIDs
+to user processes
+
+2) Worked together with Augustine to implement sys_fork
+
+3) Augustine implemented sys_waitpid and sys__exit
+
+4) Created initial implementation/framework of sys_execv and Augustine added functionality so that it can pass
+badcall and bigexec
+
