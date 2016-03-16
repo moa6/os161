@@ -1,2 +1,50 @@
 87626140      MOHAMMAD      OSAMA
 21556055      AUGUSTINE	    WONG
+
+Augustine's Contributions:
+
+Assignment 4
+
+Mohammed and I started off working on the assignment together,
+initially discussing how to implement the file table.  However, Mohammed got very ill so I
+stepped up to finish the assignment.  I coded the file table and implemented all
+of the sytem calls.
+
+Assignment 5
+
+1) Worked together with Mohammed to come up with the code needed to assign PIDs
+to user processes
+
+2) Worked together with Mohammed  to implement sys_fork
+
+3) Implemented sys_waitpid and sys__exit
+
+4) Modified Mohammed's initial implementation of sys_execv so that it can pass
+badcall and bigexec
+
+5) Fixed memory leaks, cleaned up the code, and ensured code was properly
+commented
+
+Mohammad's Contributions:
+
+Assignment 4
+
+Started off assignment with Augustine and answered the coding questions. But
+fell sick and we used Augustine code for submission to meet initial assignment
+deadline. However, I did code my own file table and most of the syscall during
+reading break (code in my local repo not in bitbucket)
+
+
+Assignment 5
+
+1) Worked together with Augustine to come up with the code needed to assign PIDs
+to user processes
+
+2) Worked together with Augustine to implement sys_fork
+
+3) Augustine implemented sys_waitpid and sys__exit
+
+4) Created initial implementation/framework of sys_execv and Augustine added
+functionality so that it can pass
+badcall and bigexec
+
