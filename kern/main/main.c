@@ -43,6 +43,7 @@
 #include <proc.h>
 #include <current.h>
 #include <synch.h>
+#include <coremap.h>
 #include <vm.h>
 #include <mainbus.h>
 #include <vfs.h>
