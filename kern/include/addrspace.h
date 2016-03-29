@@ -38,6 +38,10 @@
 #include <vm.h>
 #include "opt-dumbvm.h"
 
+#define MAX_STACKPAGES 500
+#define MIN_STACKSZ 4
+#define MIN_HEAPSZ 4
+
 struct vnode;
 
 
@@ -59,6 +63,18 @@ struct addrspace {
         paddr_t as_stackpbase;
 #else
         /* Put stuff here for your VM system */
+        int* as_pgtable1;
+	vaddr_t as_vbase1;
+	unsigned long as_npages1;
+	int* as_pgtable2;
+	vaddr_t as_vbase2;
+	unsigned long as_npages2;
+	int* as_stackpgtable;
+	vaddr_t as_stackptr;
+	int as_stacksz;
+	int* as_heappgtable;
+	vaddr_t as_heaptop;
+	int as_heapsz;
 #endif
 };
 
