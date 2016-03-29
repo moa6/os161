@@ -37,6 +37,7 @@
 #include <procnode_list.h>
 #include <synch.h>
 #include <current.h>
+#include <coremap.h>
 #include <addrspace.h>
 #include <thread.h>
 #include <proc.h>
@@ -667,4 +668,72 @@ void sys__exit(int exitcode) {
 	proc_remthread(cur_t);
 	proc_destroy(cur_p);	
         thread_exit();	
+}
+
+int
+sys_sbrk(intptr_t amount, void *retval)  {
+	int npages;
+	vaddr_t hbase;
+	vaddr_t htop;
+	vaddr_t retaddr;
+	paddr_t pframe;
+	struct addrspace *as;
+
+	as = proc_getas();
+
+	retaddr = as->as_heaptop;
+	hbase = as->as_vbase2 + as->as_npages2 * PAGE_SIZE;
+	htop = as->as_heaptop + amount;
+	
+	if (htop < hbase) {
+		*(vaddr_t *)retval = -1;
+		return EINVAL;
+
+	} else if (htop <= as->as_stackptr) {
+		as->as_heaptop = htop;
+		
+		npages = (int)(((htop & PAGE_FRAME) - hbase)/PAGE_SIZE);
+		if (htop & ~PAGE_FRAME) {
+			npages++;
+		}
+
+		if (npages < as->as_heapsz && as->as_heappgtable != NULL) {
+			for (int i=npages; i<as->as_heapsz; i++) {
+				if (as->as_heappgtable[i] & 0x80000000) {
+					pframe =
+					(paddr_t)(as->as_heappgtable[i] << 12);
+					coremap_freeppages(pframe);
+					as->as_heappgtable[i] = 0;		
+				}
+			}
+		}
+
+		while (npages <= as->as_heapsz/2) {
+			if (as->as_heapsz == MIN_HEAPSZ) {
+				break;
+			}
+
+			int *heap_temp = kmalloc(as->as_heapsz/2*sizeof(int));
+			if (heap_temp == NULL) {
+				return ENOMEM;
+			}
+			
+			for (int i=0; i<as->as_heapsz/2; i++) {
+				heap_temp[i] = 0;
+			}
+			
+			memcpy(heap_temp, as->as_heappgtable,
+			npages*sizeof(int));
+			kfree(as->as_heappgtable);
+			as->as_heappgtable = heap_temp;
+			as->as_heapsz/=2;	
+		}
+		 
+		*(vaddr_t *)retval = retaddr;
+		return 0;
+
+	} else {
+		*(vaddr_t *)retval = -1;
+		return ENOMEM;
+	}	
 }
