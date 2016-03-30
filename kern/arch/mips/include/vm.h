@@ -120,7 +120,7 @@ struct tlbshootdown {
 	/*
 	 * Change this to what you need for your VM design.
 	 */
-	int ts_placeholder;
+	paddr_t ts_paddr;
 };
 
 #define TLBSHOOTDOWN_MAX 16
