@@ -103,8 +103,25 @@ vm_tlbshootdown_all(void)
 void
 vm_tlbshootdown(const struct tlbshootdown *ts)
 {
-	(void)ts;
-	panic("vm tried to do tlb shootdown?!\n");
+	int i;
+	int spl;
+	uint32_t ehi, elo;
+	paddr_t paddr = ts->ts_paddr;
+
+	/* Disable interrupts on this CPU while frobbing the TLB. */
+	spl = splhigh();
+
+	for (i=0; i<NUM_TLB; i++) {
+		tlb_read(&ehi, &elo, i);
+		if ((elo & TLBLO_PPAGE) == paddr) {
+			tlb_write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+		}
+
+	}
+
+	splx(spl);
+
+
 }
 
 int
