@@ -30,6 +30,7 @@
 #include <types.h>
 #include <lib.h>
 #include <mips/trapframe.h>
+#include <mips/vm.h>
 #include <limits.h>
 #include <copyinout.h>
 #include <syscall.h>
@@ -676,7 +677,8 @@ sys_sbrk(intptr_t amount, void *retval)  {
 	vaddr_t hbase;
 	vaddr_t htop;
 	vaddr_t retaddr;
-	paddr_t pframe;
+	paddr_t paddr;
+	struct tlbshootdown *ts;
 	struct addrspace *as;
 
 	as = proc_getas();
@@ -700,9 +702,18 @@ sys_sbrk(intptr_t amount, void *retval)  {
 		if (npages < as->as_heapsz && as->as_heappgtable != NULL) {
 			for (int i=npages; i<as->as_heapsz; i++) {
 				if (as->as_heappgtable[i] & 0x80000000) {
-					pframe =
+					paddr =
 					(paddr_t)(as->as_heappgtable[i] << 12);
-					coremap_freeppages(pframe);
+					coremap_freeppages(paddr);
+					ts = kmalloc(sizeof(const struct
+					tlbshootdown));
+					if (ts == NULL) {
+						*(vaddr_t *)retval = -1;
+						return EINVAL;
+					}
+					ts->ts_paddr = paddr; 
+					vm_tlbshootdown(ts);
+							
 					as->as_heappgtable[i] = 0;		
 				}
 			}
