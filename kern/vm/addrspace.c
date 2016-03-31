@@ -77,11 +77,13 @@ alloc_kpages(unsigned npages)
 
 	} else {
 		pa = getppages(npages);
-		if (pa==0) {
-			return 0;
-		}
 
 	}
+
+	if (pa == 0) {
+		return 0;
+	}
+
 	return PADDR_TO_KVADDR(pa);
 }
 
@@ -551,6 +553,10 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 			return ENOMEM;
 		}
 
+		for (unsigned long i=0; i<new->as_npages1; i++) {
+			new->as_pgtable1[i] = 0;
+		}
+
 		for (unsigned long i=0; i<old->as_npages1; i++) {
 			if (old->as_pgtable1[i] & 0x80000000) {
 				new_paddr = coremap_getppages(1);
@@ -567,8 +573,6 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void
 				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
-			} else {
-				new->as_pgtable1[i] = 0;
 			}
 		}
 	}
@@ -578,6 +582,10 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		if (new->as_pgtable2 == NULL) {
 			as_destroy(new);
 			return ENOMEM;
+		}
+
+		for (unsigned long i=0; i<new->as_npages2; i++) {
+			new->as_pgtable2[i] = 0;
 		}
 
 		for (unsigned long i=0; i<old->as_npages2; i++) {
@@ -596,8 +604,6 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void
 				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
-			} else {
-				new->as_pgtable2[i] = 0;
 			}
 		}
 	}
@@ -609,11 +615,12 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 			return ENOMEM;
 		}
 
-		for (int i=0; i<old->as_stacksz; i++) {
-			if (old->as_stackpgtable[i] == 0) {
-				new->as_stackpgtable[i] = 0;
+		for (int i=0; i<new->as_stacksz; i++) {
+			new->as_stackpgtable[i] = 0;
+		}
 
-			} else if (old->as_stackpgtable[i] & 0x80000000) {
+		for (int i=0; i<old->as_stacksz; i++) {
+			if (old->as_stackpgtable[i] & 0x80000000) {
 				new_paddr = coremap_getppages(1);
 				if (new_paddr == 0) {
 					as_destroy(new);
@@ -641,11 +648,12 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 			return ENOMEM;
 		}
 
-		for (int i=0; i<old->as_heapsz; i++) {
-			if (old->as_heappgtable[i] == 0) {
-				new->as_heappgtable[i] = 0;
+		for (int i=0; i<new->as_heapsz; i++) {
+			new->as_heappgtable[i] = 0;
+		}
 
-			} else if (old->as_heappgtable[i] & 0x80000000) {
+		for (int i=0; i<old->as_heapsz; i++) {
+			if (old->as_heappgtable[i] & 0x80000000) {
 				new_paddr = coremap_getppages(1);
 				if (new_paddr == 0) {
 					as_destroy(new);
