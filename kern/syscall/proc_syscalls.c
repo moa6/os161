@@ -54,6 +54,7 @@
  */
 int
 sys_fork(struct trapframe* tf, pid_t* retval) {
+	int i;
 	int result;
 	pid_t cp_pid;
 	const char *cp_name;
@@ -145,6 +146,29 @@ sys_fork(struct trapframe* tf, pid_t* retval) {
                         argv, 2);
 
         if (result) {
+        	for (i=0; i<=child_proc->p_filetable->last_fd; i++) {
+                	if (child_proc->p_filetable->entries[i] != NULL) {
+                       	 	if (child_proc->p_filetable->entries[i]->f_refcount > 1) {
+					lock_acquire(child_proc->p_filetable->entries[i]->f_lock);
+
+					if (child_proc->p_filetable->entries[i]->f_refcount > 1) {
+						child_proc->p_filetable->entries[i]->f_refcount--;
+						lock_release(child_proc->p_filetable->entries[i]->f_lock);
+						child_proc->p_filetable->entries[i]
+						= NULL;
+
+					} else {
+						lock_release(child_proc->p_filetable->entries[i]->f_lock);
+						vfs_close(child_proc->p_filetable->entries[i]->vn);
+					}
+
+				} else {
+					vfs_close(child_proc->p_filetable->entries[i]->vn);
+				}
+								 
+                	}
+        	}
+
                 proc_destroy(child_proc);
                 return result;
         }
