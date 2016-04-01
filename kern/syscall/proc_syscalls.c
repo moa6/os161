@@ -137,6 +137,10 @@ sys_fork(struct trapframe* tf, pid_t* retval) {
 
 	/* Fork the current thread */
 	argv = kmalloc(2*sizeof(void*));
+	if (argv == NULL) {
+		return ENOMEM;
+	}
+
 	argv[0] = cp_tf;
 	argv[1] = cp_as;
 
