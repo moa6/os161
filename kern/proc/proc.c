@@ -59,8 +59,6 @@
  */
 struct proc *kproc;
 
-//struct pidtable *pidtable;
-
 /*
  * Create a proc structure.
  */
