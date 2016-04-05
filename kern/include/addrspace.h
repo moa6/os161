@@ -41,6 +41,11 @@
 #define MAX_STACKPAGES 500
 #define MIN_STACKSZ 4
 #define MIN_HEAPSZ 4
+#define PG_VALID 0x80000000
+#define PG_FRAME 0x000FFFFF
+#define PG_SWAP 0x40000000
+#define PG_BUSY 0x20000000
+#define PG_DIRTY 0x10000000
 
 struct vnode;
 
@@ -63,6 +68,8 @@ struct addrspace {
         paddr_t as_stackpbase;
 #else
         /* Put stuff here for your VM system */
+	struct lock *as_lock;
+	struct cv *as_cv;
         int* as_pgtable1;
 	vaddr_t as_vbase1;
 	unsigned long as_npages1;
