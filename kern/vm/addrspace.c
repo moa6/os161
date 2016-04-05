@@ -33,9 +33,12 @@
 #include <lib.h>
 #include <spl.h>
 #include <spinlock.h>
+#include <synch.h>
 #include <proc.h>
 #include <current.h>
 #include <mips/tlb.h>
+#include <bitmap.h>
+#include <swap.h>
 #include <coremap.h>
 #include <addrspace.h>
 #include <vm.h>
@@ -48,6 +51,7 @@ static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
 void
 vm_bootstrap(void)
 {
+	sw_bootstrap();
 	coremap_bootstrap();
 }
 
@@ -73,7 +77,7 @@ alloc_kpages(unsigned npages)
 	paddr_t pa;
 
 	if (coremap_ready()) {
-		pa = coremap_getppages(npages);
+		pa = coremap_getkpages(npages);
 
 	} else {
 		pa = getppages(npages);
@@ -93,7 +97,7 @@ free_kpages(vaddr_t addr)
 	paddr_t pframe;
 
 	pframe = (paddr_t)(addr - MIPS_KSEG0);
-	coremap_freeppages(pframe);
+	coremap_freekpages(pframe);
 }
 
 void
@@ -132,6 +136,8 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	int tlb_index;
 	int *pgtable;
 	int sz;
+	int result;
+	unsigned lru_index;
 	signed long index;
 	unsigned long npages;
 	vaddr_t vbase1, vtop1, vbase2, vtop2, stacktop, heaptop, stacklimit;
@@ -144,14 +150,8 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	DEBUG(DB_VM, "vm: fault: 0x%x\n", faultaddress);
 
-	switch (faulttype) {
-	    case VM_FAULT_READONLY:
-		/* We always create pages read-write, so we can't get this */
-		panic("vm: got VM_FAULT_READONLY\n");
-	    case VM_FAULT_READ:
-	    case VM_FAULT_WRITE:
-		break;
-	    default:
+	if (faulttype != VM_FAULT_READONLY && faulttype != VM_FAULT_READ &&
+		faulttype != VM_FAULT_WRITE) {
 		return EINVAL;
 	}
 
@@ -293,20 +293,44 @@ fetchpaddr:
 	if (index >= (signed long)npages) {
 		return EFAULT;
 
-	} else if (pgtable[index] & 0x80000000) {
-		paddr = (paddr_t)((pgtable[index] & 0x000FFFFF) << 12);
+	} 
+	
+	lock_acquire(as->as_lock);
 
-	} else if (pgtable[index] == 0) {
-		paddr = coremap_getppages(1);
-		if (paddr == 0) {
-			return ENOMEM;
+	while (pgtable[index] & PG_BUSY) {
+		cv_wait(as->as_cv, as->as_lock);
+	}
+
+	if (pgtable[index] & PG_VALID) {
+
+		if (faulttype == VM_FAULT_READONLY && !(pgtable[index] & PG_DIRTY)) {
+			pgtable[index] |= PG_DIRTY;
 		}
 
-		pgtable[index] = 0x80000000 | (int)(paddr >> 12);
+		paddr = (paddr_t)((pgtable[index] & PG_FRAME) << 12);
+
+	} else if (pgtable[index] & PG_SWAP) { 
+	
+		result = sw_pagein(&pgtable[index]);
+		if (result) {
+			return result;
+		}
+		
+	} else if (pgtable[index] == 0) {
+		pgtable[index] = PG_VALID | PG_DIRTY;
+
+		result = coremap_getpage(&pgtable[index]);
+		if (result) {
+			pgtable[index] = 0;
+			lock_release(as->as_lock);
+			return result;
+		}
+
+		paddr = (paddr_t)((pgtable[index] & PG_FRAME) << 12);
 		bzero((void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE);
 
 	} else {
-		panic("vm_fault should get to here!\n");
+		panic("vm_fault should not get to here!\n");
 	}
 	
 	/* make sure it's page-aligned */
@@ -315,12 +339,40 @@ fetchpaddr:
 	/* Disable interrupts on this CPU while frobbing the TLB. */
 	spl = splhigh();
 
-	tlb_index = random() & 0x0000003F;
+	tlb_index = random() % NUM_TLB;
 	ehi = faultaddress;
+/*
+	if (faulttype == VM_FAULT_READONLY) {
+		ts = kmalloc(sizeof(const struct tlbshootdown));
+		if (ts == NULL) {
+			return ENOMEM;
+		}
+
+		ts->ts_paddr = paddr;
+		vm_tlbshootdown(ts);
+		kfree(ts);
+		elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+
+	} else {
+		elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+	}
+*/
+
 	elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+
 	DEBUG(DB_VM, "vm: 0x%x -> 0x%x\n", faultaddress, paddr);
 	tlb_write(ehi, elo, tlb_index);
 	splx(spl);
+
+	lru_index = (unsigned)(paddr/PAGE_SIZE);
+	spinlock_acquire(&kswap->sw_lruclk->l_spinlock);
+	if (!bitmap_isset(kswap->sw_lruclk->l_clkface, lru_index)) {
+		bitmap_mark(kswap->sw_lruclk->l_clkface, lru_index);
+	} 
+	spinlock_release(&kswap->sw_lruclk->l_spinlock);	
+
+	lock_release(as->as_lock);
+//	cv_signal(as->as_cv, as->as_lock);
 	return 0;
 }
 
@@ -329,6 +381,16 @@ as_create(void)
 {
 	struct addrspace *as = kmalloc(sizeof(struct addrspace));
 	if (as==NULL) {
+		return NULL;
+	}
+
+	as->as_lock = lock_create("as lock");
+	if (as->as_lock == NULL) {
+		return NULL;
+	}
+
+	as->as_cv = cv_create("as cv");
+	if (as->as_cv == NULL) {
 		return NULL;
 	}
 
@@ -355,12 +417,26 @@ as_destroy(struct addrspace *as)
 
 	paddr_t pframe;
 
+	lock_acquire(as->as_lock);
+
 	if (as->as_pgtable1 != NULL) {
 		for (unsigned long i=0; i<as->as_npages1; i++) {
-			if (as->as_pgtable1[i] & 0x80000000) {
+			while (as->as_pgtable1[i] & PG_BUSY) {
+				cv_wait(as->as_cv, as->as_lock);
+			}
+
+			if (as->as_pgtable1[i] & PG_VALID) {
 				pframe = (paddr_t)(as->as_pgtable1[i] << 12);
 				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
-				coremap_freeppages(pframe);			
+				coremap_freepage(pframe);
+							
+			} else if (as->as_pgtable1[i] & PG_SWAP) {
+
+				/* MARK OFFSET IN DISK SWAP AS FREE */
+
+			} else {
+				KASSERT(as->as_pgtable1[i] == 0);
+
 			}
 
 		}
@@ -371,10 +447,21 @@ as_destroy(struct addrspace *as)
 
 	if (as->as_pgtable2 != NULL) {
 		for (unsigned long i=0; i<as->as_npages2; i++) {
-			if (as->as_pgtable2[i] & 0x80000000) {
+			while (as->as_pgtable2[i] & PG_BUSY) {
+				cv_wait(as->as_cv, as->as_lock);
+			}
+
+			if (as->as_pgtable2[i] & PG_VALID) {
 				pframe = (paddr_t)(as->as_pgtable2[i] << 12);
 				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
-				coremap_freeppages(pframe);			
+				coremap_freepage(pframe);
+							
+			} else if (as->as_pgtable2[i] & PG_SWAP) {
+
+				/* MARK OFFSET IN DISK SWAP AS FREE */
+
+			} else {
+				KASSERT(as->as_pgtable2[i] == 0);
 			}
 
 		}
@@ -385,13 +472,22 @@ as_destroy(struct addrspace *as)
 	if (as->as_stackpgtable != NULL) {
 
 		for (int i=0; i<as->as_stacksz; i++) {
-			if (as->as_stackpgtable != NULL) {
-				if (as->as_stackpgtable[i] & 0x80000000) {
-					pframe =
-					(paddr_t)(as->as_stackpgtable[i] << 12);
-					bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
-					coremap_freeppages(pframe);			
-				}
+			while (as->as_stackpgtable[i] & PG_BUSY) {
+				cv_wait(as->as_cv, as->as_lock);
+			}
+
+			if (as->as_stackpgtable[i] & PG_VALID) {
+				pframe =
+				(paddr_t)(as->as_stackpgtable[i] << 12);
+				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
+				coremap_freepage(pframe);
+							
+			} else if (as->as_stackpgtable[i] & PG_SWAP) {
+
+				/* MARK OFFSET IN DISK AS FREE */
+				 
+			} else {
+				KASSERT(as->as_stackpgtable[i] == 0);
 			}
 			
 		}
@@ -402,21 +498,31 @@ as_destroy(struct addrspace *as)
 	if (as->as_heappgtable != NULL) {
 
 		for (int i=0; i<as->as_heapsz; i++) {
-			if (as->as_heappgtable[i] != 0) {
-				if (as->as_heappgtable[i] & 0x80000000) {
-					pframe =
-					(paddr_t)(as->as_heappgtable[i] << 12);
-					bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
-					coremap_freeppages(pframe);			
-				}
+			while (as->as_heappgtable[i] & PG_BUSY) {
+				cv_wait(as->as_cv, as->as_lock);
 			}
-			
+
+			if (as->as_heappgtable[i] & PG_VALID) {
+				pframe =
+				(paddr_t)(as->as_heappgtable[i] << 12);
+				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
+				coremap_freepage(pframe);
+							
+			} else if (as->as_heappgtable[i] & PG_SWAP) {
+				
+				/* MARK OFFSET IN DISK AS FREE */
+
+			} else {
+				KASSERT(as->as_heappgtable[i] == 0);
+			}
 		}
 
 		kfree(as->as_heappgtable);
 	}
 
-
+	lock_release(as->as_lock);
+	lock_destroy(as->as_lock);
+	cv_destroy(as->as_cv);
 	kfree(as);
 }
 
@@ -528,6 +634,7 @@ as_define_stack(struct addrspace *as, vaddr_t *stackptr)
 int
 as_copy(struct addrspace *old, struct addrspace **ret)
 {
+	int result;
 	paddr_t old_paddr;
 	paddr_t new_paddr;
 	struct addrspace *new;
@@ -546,9 +653,14 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	new->as_heaptop = old->as_heaptop;
 	new->as_heapsz = old->as_heapsz;
 
+	lock_acquire(old->as_lock);
+	lock_acquire(new->as_lock);
+
 	if (old->as_pgtable1 != NULL) {
 		new->as_pgtable1 = kmalloc(new->as_npages1 * sizeof(int));
 		if (new->as_pgtable1 == NULL) {
+			lock_release(old->as_lock);
+			lock_release(new->as_lock);
 			as_destroy(new);
 			return ENOMEM;
 		}
@@ -558,21 +670,48 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		}
 
 		for (unsigned long i=0; i<old->as_npages1; i++) {
-			if (old->as_pgtable1[i] & 0x80000000) {
-				new_paddr = coremap_getppages(1);
-				if (new_paddr == 0) {
+			while (old->as_pgtable1[i] & PG_BUSY) {
+				cv_wait(old->as_cv, old->as_lock);
+			}
+
+			if (old->as_pgtable1[i] & PG_VALID) {
+				new->as_pgtable1[i] = PG_VALID | PG_DIRTY;
+
+				result = coremap_getpage(&new->as_pgtable1[i]);
+				if (result) {
+					lock_release(old->as_lock);
+					lock_release(new->as_lock);
 					as_destroy(new);
-					return ENOMEM;
+					return result;
 				}
 
-				new->as_pgtable1[i] = 0x80000000 | (int)(new_paddr >>
-				12);
-				old_paddr = (paddr_t)((old->as_pgtable1[i] & 0x000FFFFF)
+				new_paddr = (paddr_t)((new->as_pgtable1[i] &
+				PG_FRAME)
+				<< 12);
+
+		
+				old_paddr = (paddr_t)((old->as_pgtable1[i] &
+				PG_FRAME)
 				<< 12);
 
 				memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void
 				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
+			} else if (old->as_pgtable1[i] & PG_SWAP) {
+				new->as_pgtable1[i] = PG_VALID | PG_DIRTY;
+
+				result = coremap_getpage(&new->as_pgtable1[i]);
+				if (result) {
+					lock_release(old->as_lock);
+					lock_release(new->as_lock);
+					as_destroy(new);
+					return result;
+				}
+
+				/* Swap in data from disk to new pgtable entry */
+				
+			} else { 
+				KASSERT(old->as_pgtable1[i] == 0);
 			}
 		}
 	}
@@ -580,6 +719,8 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	if (old->as_pgtable2 != NULL) {
 		new->as_pgtable2 = kmalloc(new->as_npages2 * sizeof(int));
 		if (new->as_pgtable2 == NULL) {
+			lock_release(old->as_lock);
+			lock_release(new->as_lock);
 			as_destroy(new);
 			return ENOMEM;
 		}
@@ -589,28 +730,58 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		}
 
 		for (unsigned long i=0; i<old->as_npages2; i++) {
-			if (old->as_pgtable2[i] & 0x80000000) {
-				new_paddr = coremap_getppages(1);
-				if (new_paddr == 0) {
+			while (old->as_pgtable2[i] & PG_BUSY) {
+				cv_wait(old->as_cv, old->as_lock);
+			}
+
+			if (old->as_pgtable2[i] & PG_VALID) {
+				new->as_pgtable2[i] = PG_VALID | PG_DIRTY;
+
+				result = coremap_getpage(&new->as_pgtable2[i]);
+				if (result) {
+					lock_release(old->as_lock);
+					lock_release(new->as_lock);
 					as_destroy(new);
-					return ENOMEM;
+					return result;
 				}
 
-				new->as_pgtable2[i] = 0x80000000 | (int)(new_paddr >>
-				12);
-				old_paddr = (paddr_t)((old->as_pgtable2[i] & 0x000FFFFF)
+				new_paddr = (paddr_t)((new->as_pgtable2[i] &
+				PG_FRAME)
+				<< 12);
+
+		
+				old_paddr = (paddr_t)((old->as_pgtable2[i] &
+				PG_FRAME)
 				<< 12);
 
 				memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void
 				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
+			} else if (old->as_pgtable2[i] & PG_SWAP) {
+				new->as_pgtable2[i] = PG_VALID | PG_DIRTY;
+
+				result = coremap_getpage(&new->as_pgtable2[i]);
+				if (result) {
+					lock_release(old->as_lock);
+					lock_release(new->as_lock);
+					as_destroy(new);
+					return result;
+				}
+
+				/* Swap in data from disk to new pgtable entry */
+				
+			} else { 
+				KASSERT(old->as_pgtable2[i] == 0);
 			}
 		}
+
 	}
 
 	if (old->as_stackpgtable != NULL) {
 		new->as_stackpgtable = kmalloc(new->as_stacksz * sizeof(int));
 		if (new->as_stackpgtable == NULL) {
+			lock_release(old->as_lock);
+			lock_release(new->as_lock);
 			as_destroy(new);
 			return ENOMEM;
 		}
@@ -620,23 +791,50 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		}
 
 		for (int i=0; i<old->as_stacksz; i++) {
-			if (old->as_stackpgtable[i] & 0x80000000) {
-				new_paddr = coremap_getppages(1);
-				if (new_paddr == 0) {
+			while (old->as_stackpgtable[i] & PG_BUSY) {
+				cv_wait(old->as_cv, old->as_lock);
+			}
+
+			if (old->as_stackpgtable[i] & PG_VALID) {
+				new->as_stackpgtable[i] = PG_VALID | PG_DIRTY;
+
+				result = coremap_getpage(&new->as_stackpgtable[i]);
+				if (result) {
+					lock_release(old->as_lock);
+					lock_release(new->as_lock);
 					as_destroy(new);
-					return ENOMEM;
+					return result;
 				}
 
-				new->as_stackpgtable[i] = 0x80000000 | (int)(new_paddr >>
-				12);
-				old_paddr =
-				(paddr_t)((old->as_stackpgtable[i] & 0x000FFFFF)
+				new_paddr = (paddr_t)((new->as_stackpgtable[i] &
+				PG_FRAME)
+				<< 12);
+
+		
+				old_paddr = (paddr_t)((old->as_stackpgtable[i] &
+				PG_FRAME)
 				<< 12);
 
 				memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void
 				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
+			} else if (old->as_stackpgtable[i] & PG_SWAP) {
+				new->as_stackpgtable[i] = PG_VALID | PG_DIRTY;
+
+				result = coremap_getpage(&new->as_stackpgtable[i]);
+				if (result) {
+					lock_release(old->as_lock);
+					lock_release(new->as_lock);
+					as_destroy(new);
+					return result;
+				}
+
+				/* Swap in data from disk to new pgtable entry */
+				
+			} else {
+				KASSERT(old->as_stackpgtable[i] == 0);
 			}
+
 		}
 
 	}
@@ -644,6 +842,8 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	if (old->as_heappgtable != NULL) {
 		new->as_heappgtable = kmalloc(new->as_heapsz * sizeof(int));
 		if (new->as_heappgtable == NULL) {
+			lock_release(old->as_lock);
+			lock_release(new->as_lock);
 			as_destroy(new);
 			return ENOMEM;
 		}
@@ -653,27 +853,56 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		}
 
 		for (int i=0; i<old->as_heapsz; i++) {
-			if (old->as_heappgtable[i] & 0x80000000) {
-				new_paddr = coremap_getppages(1);
-				if (new_paddr == 0) {
+			while (old->as_heappgtable[i] & PG_BUSY) {
+				cv_wait(old->as_cv, old->as_lock);
+			}
+
+			if (old->as_heappgtable[i] & PG_VALID) {
+				new->as_heappgtable[i] = PG_VALID | PG_DIRTY;
+
+				result = coremap_getpage(&new->as_heappgtable[i]);
+				if (result) {
+					lock_release(old->as_lock);
+					lock_release(new->as_lock);
 					as_destroy(new);
-					return ENOMEM;
+					return result;
 				}
 
-				new->as_heappgtable[i] = 0x80000000 | (int)(new_paddr >>
-				12);
-				old_paddr =
-				(paddr_t)((old->as_heappgtable[i] & 0x000FFFFF)
+				new_paddr = (paddr_t)((new->as_heappgtable[i] &
+				PG_FRAME)
+				<< 12);
+
+		
+				old_paddr = (paddr_t)((old->as_heappgtable[i] &
+				PG_FRAME)
 				<< 12);
 
 				memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void
 				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
+			} else if (old->as_heappgtable[i] & PG_SWAP) {
+				new->as_heappgtable[i] = PG_VALID | PG_DIRTY;
+
+				result = coremap_getpage(&new->as_heappgtable[i]);
+				if (result) {
+					lock_release(old->as_lock);
+					lock_release(new->as_lock);
+					as_destroy(new);
+					return result;
+				}
+
+				/* Swap in data from disk to new pgtable entry */
+				
+			} else {
+				KASSERT(old->as_heappgtable[i] == 0);
 			}
+
 		}
 
 	}
 
+	lock_release(old->as_lock);
+	lock_release(new->as_lock);
 	*ret = new;
 	return 0;
 }
