@@ -34,17 +34,20 @@
 #include <lib.h>
 
 struct coremap_entry {
-	vaddr_t vaddr;
-	int next;
-	bool allocated;
+	struct addrspace *ce_addrspace;
+	bool ce_allocated;
+	bool ce_foruser;
+	bool ce_busy;
+	int ce_next;
+	int *ce_pgentry;
+	int ce_swapoffset;
 };
 
 struct coremap {
 	struct coremap_entry *c_entries;
-	struct spinlock c_lock;
-	unsigned long total_ppages;
-	paddr_t firstpaddr;
-	bool ready;
+	struct spinlock c_spinlock;
+	unsigned long c_npages;
+	bool c_ready;
 };
 
 extern struct coremap *coremap;
@@ -55,8 +58,12 @@ void coremap_bootstrap(void);
 
 bool coremap_ready(void);
 
-paddr_t coremap_getppages(unsigned long npages);
+paddr_t coremap_getkpages(unsigned long npages);
 
-void coremap_freeppages(paddr_t pframe); 
+int coremap_getpage(int *pg_entry);
+
+void coremap_freekpages(paddr_t pframe);
+
+void coremap_freepage(paddr_t pframe); 
 
 #endif
