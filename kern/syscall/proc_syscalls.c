@@ -720,6 +720,8 @@ sys_sbrk(intptr_t amount, void *retval)  {
 		return EINVAL;
 
 	} else if (htop <= as->as_stackptr) {
+		lock_acquire(as->as_lock);
+
 		as->as_heaptop = htop;
 		
 		npages = (int)(((htop & PAGE_FRAME) - hbase)/PAGE_SIZE);
@@ -728,22 +730,36 @@ sys_sbrk(intptr_t amount, void *retval)  {
 		}
 
 		if (npages < as->as_heapsz && as->as_heappgtable != NULL) {
+			
 			for (int i=npages; i<as->as_heapsz; i++) {
-				if (as->as_heappgtable[i] & 0x80000000) {
+				while (as->as_heappgtable[i] & PG_BUSY) {
+					cv_wait(as->as_cv, as->as_lock);
+				}
+
+				if (as->as_heappgtable[i] & PG_VALID) {
 					paddr =
 					(paddr_t)(as->as_heappgtable[i] << 12);
-					coremap_freeppages(paddr);
+					coremap_freepage(paddr);
 					ts = kmalloc(sizeof(const struct
 					tlbshootdown));
 					if (ts == NULL) {
+						lock_release(as->as_lock);
 						*(vaddr_t *)retval = -1;
-						return EINVAL;
+						return ENOMEM;
 					}
 					ts->ts_paddr = paddr; 
 					vm_tlbshootdown(ts);
+					kfree(ts);
 							
-					as->as_heappgtable[i] = 0;		
+					as->as_heappgtable[i] = 0;
+							
+				} else if (as->as_heappgtable[i] & PG_SWAP) {
+			
+					/* MARK DISK OFFSET AS FREE */
+
 				}
+
+				KASSERT(as->as_heappgtable[i] == 0);
 			}
 		}
 
@@ -754,6 +770,7 @@ sys_sbrk(intptr_t amount, void *retval)  {
 
 			int *heap_temp = kmalloc(as->as_heapsz/2*sizeof(int));
 			if (heap_temp == NULL) {
+				lock_release(as->as_lock);
 				return ENOMEM;
 			}
 			
@@ -768,6 +785,7 @@ sys_sbrk(intptr_t amount, void *retval)  {
 			as->as_heapsz/=2;	
 		}
 		 
+		lock_release(as->as_lock);
 		*(vaddr_t *)retval = retaddr;
 		return 0;
 
