@@ -137,7 +137,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	int *pgtable;
 	int sz;
 	int result;
-	unsigned lru_index;
+//	unsigned lru_index;
 	signed long index;
 	unsigned long npages;
 	vaddr_t vbase1, vtop1, vbase2, vtop2, stacktop, heaptop, stacklimit;
@@ -310,14 +310,22 @@ fetchpaddr:
 		paddr = (paddr_t)((pgtable[index] & PG_FRAME) << 12);
 
 	} else if (pgtable[index] & PG_SWAP) { 
+
+		pgtable[index] |= PG_BUSY;
+		
+		lock_release(as->as_lock);
 	
 		result = sw_pagein(&pgtable[index]);
 		if (result) {
+			pgtable[index] &= ~PG_BUSY;
+			lock_release(as->as_lock);
 			return result;
 		}
 		
 	} else if (pgtable[index] == 0) {
-		pgtable[index] = PG_VALID | PG_DIRTY;
+		pgtable[index] = PG_VALID | PG_DIRTY | PG_BUSY;
+
+		lock_release(as->as_lock);
 
 		result = coremap_getpage(&pgtable[index]);
 		if (result) {
@@ -364,14 +372,22 @@ fetchpaddr:
 	tlb_write(ehi, elo, tlb_index);
 	splx(spl);
 
+/*
 	lru_index = (unsigned)(paddr/PAGE_SIZE);
+
 	spinlock_acquire(&kswap->sw_lruclk->l_spinlock);
 	if (!bitmap_isset(kswap->sw_lruclk->l_clkface, lru_index)) {
 		bitmap_mark(kswap->sw_lruclk->l_clkface, lru_index);
 	} 
 	spinlock_release(&kswap->sw_lruclk->l_spinlock);	
+*/
+	if (lock_do_i_hold(as->as_lock)) {
+		lock_release(as->as_lock);
+	}
 
-	lock_release(as->as_lock);
+	if (pgtable[index] & PG_BUSY) {
+		pgtable[index] &= ~PG_BUSY;
+	}
 //	cv_signal(as->as_cv, as->as_lock);
 	return 0;
 }
@@ -416,14 +432,21 @@ as_destroy(struct addrspace *as)
 	KASSERT(as != NULL);
 
 	paddr_t pframe;
-
-	lock_acquire(as->as_lock);
+	unsigned sw_offset;
 
 	if (as->as_pgtable1 != NULL) {
+
 		for (unsigned long i=0; i<as->as_npages1; i++) {
+
+			lock_acquire(as->as_lock);
+
 			while (as->as_pgtable1[i] & PG_BUSY) {
 				cv_wait(as->as_cv, as->as_lock);
 			}
+
+			as->as_pgtable1[i] |= PG_BUSY;
+			
+			lock_release(as->as_lock);
 
 			if (as->as_pgtable1[i] & PG_VALID) {
 				pframe = (paddr_t)(as->as_pgtable1[i] << 12);
@@ -432,10 +455,14 @@ as_destroy(struct addrspace *as)
 							
 			} else if (as->as_pgtable1[i] & PG_SWAP) {
 
-				/* MARK OFFSET IN DISK SWAP AS FREE */
+				sw_offset = (unsigned)(as->as_pgtable1[i] &
+				PG_FRAME);
+				lock_acquire(kswap->sw_disklock);
+				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
+				lock_release(kswap->sw_disklock);					
 
 			} else {
-				KASSERT(as->as_pgtable1[i] == 0);
+				KASSERT(as->as_pgtable1[i] & PG_BUSY);
 
 			}
 
@@ -444,12 +471,19 @@ as_destroy(struct addrspace *as)
 		kfree(as->as_pgtable1);
 	}
 
-
 	if (as->as_pgtable2 != NULL) {
+
 		for (unsigned long i=0; i<as->as_npages2; i++) {
+
+			lock_acquire(as->as_lock);
+
 			while (as->as_pgtable2[i] & PG_BUSY) {
 				cv_wait(as->as_cv, as->as_lock);
 			}
+
+			as->as_pgtable2[i] |= PG_BUSY;
+			
+			lock_release(as->as_lock);
 
 			if (as->as_pgtable2[i] & PG_VALID) {
 				pframe = (paddr_t)(as->as_pgtable2[i] << 12);
@@ -458,10 +492,15 @@ as_destroy(struct addrspace *as)
 							
 			} else if (as->as_pgtable2[i] & PG_SWAP) {
 
-				/* MARK OFFSET IN DISK SWAP AS FREE */
+				sw_offset = (unsigned)(as->as_pgtable2[i] &
+				PG_FRAME);
+				lock_acquire(kswap->sw_disklock);
+				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
+				lock_release(kswap->sw_disklock);					
 
 			} else {
-				KASSERT(as->as_pgtable2[i] == 0);
+				KASSERT(as->as_pgtable2[i] & PG_BUSY);
+
 			}
 
 		}
@@ -469,58 +508,80 @@ as_destroy(struct addrspace *as)
 		kfree(as->as_pgtable2);
 	}
 
-	if (as->as_stackpgtable != NULL) {
-
-		for (int i=0; i<as->as_stacksz; i++) {
-			while (as->as_stackpgtable[i] & PG_BUSY) {
-				cv_wait(as->as_cv, as->as_lock);
-			}
-
-			if (as->as_stackpgtable[i] & PG_VALID) {
-				pframe =
-				(paddr_t)(as->as_stackpgtable[i] << 12);
-				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
-				coremap_freepage(pframe);
-							
-			} else if (as->as_stackpgtable[i] & PG_SWAP) {
-
-				/* MARK OFFSET IN DISK AS FREE */
-				 
-			} else {
-				KASSERT(as->as_stackpgtable[i] == 0);
-			}
-			
-		}
-
-		kfree(as->as_stackpgtable);
-	}
-
 	if (as->as_heappgtable != NULL) {
 
 		for (int i=0; i<as->as_heapsz; i++) {
+
+			lock_acquire(as->as_lock);
+
 			while (as->as_heappgtable[i] & PG_BUSY) {
 				cv_wait(as->as_cv, as->as_lock);
 			}
 
+			as->as_heappgtable[i] |= PG_BUSY;
+			
+			lock_release(as->as_lock);
+
 			if (as->as_heappgtable[i] & PG_VALID) {
-				pframe =
-				(paddr_t)(as->as_heappgtable[i] << 12);
+				pframe = (paddr_t)(as->as_heappgtable[i] << 12);
 				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
 				coremap_freepage(pframe);
 							
 			} else if (as->as_heappgtable[i] & PG_SWAP) {
-				
-				/* MARK OFFSET IN DISK AS FREE */
+
+				sw_offset = (unsigned)(as->as_heappgtable[i] &
+				PG_FRAME);
+				lock_acquire(kswap->sw_disklock);
+				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
+				lock_release(kswap->sw_disklock);					
 
 			} else {
-				KASSERT(as->as_heappgtable[i] == 0);
+				KASSERT(as->as_heappgtable[i] & PG_BUSY);
+
 			}
+
 		}
 
 		kfree(as->as_heappgtable);
 	}
 
-	lock_release(as->as_lock);
+	if (as->as_stackpgtable != NULL) {
+
+		for (int i=0; i<as->as_stacksz; i++) {
+
+			lock_acquire(as->as_lock);
+
+			while (as->as_stackpgtable[i] & PG_BUSY) {
+				cv_wait(as->as_cv, as->as_lock);
+			}
+
+			as->as_stackpgtable[i] |= PG_BUSY;
+			
+			lock_release(as->as_lock);
+
+			if (as->as_stackpgtable[i] & PG_VALID) {
+				pframe = (paddr_t)(as->as_stackpgtable[i] << 12);
+				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
+				coremap_freepage(pframe);
+							
+			} else if (as->as_stackpgtable[i] & PG_SWAP) {
+
+				sw_offset = (unsigned)(as->as_stackpgtable[i] &
+				PG_FRAME);
+				lock_acquire(kswap->sw_disklock);
+				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
+				lock_release(kswap->sw_disklock);					
+
+			} else {
+				KASSERT(as->as_stackpgtable[i] & PG_BUSY);
+
+			}
+
+		}
+
+		kfree(as->as_stackpgtable);
+	}
+
 	lock_destroy(as->as_lock);
 	cv_destroy(as->as_cv);
 	kfree(as);
@@ -653,14 +714,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	new->as_heaptop = old->as_heaptop;
 	new->as_heapsz = old->as_heapsz;
 
-	lock_acquire(old->as_lock);
-	lock_acquire(new->as_lock);
-
 	if (old->as_pgtable1 != NULL) {
 		new->as_pgtable1 = kmalloc(new->as_npages1 * sizeof(int));
 		if (new->as_pgtable1 == NULL) {
-			lock_release(old->as_lock);
-			lock_release(new->as_lock);
 			as_destroy(new);
 			return ENOMEM;
 		}
@@ -670,17 +726,25 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		}
 
 		for (unsigned long i=0; i<old->as_npages1; i++) {
+
+			lock_acquire(old->as_lock);
+
 			while (old->as_pgtable1[i] & PG_BUSY) {
 				cv_wait(old->as_cv, old->as_lock);
 			}
 
+			old->as_pgtable1[i] |= PG_BUSY;
+
+			lock_release(old->as_lock);
+
+			new->as_pgtable1[i] = PG_VALID | PG_DIRTY |
+			PG_BUSY;
+
 			if (old->as_pgtable1[i] & PG_VALID) {
-				new->as_pgtable1[i] = PG_VALID | PG_DIRTY;
 
 				result = coremap_getpage(&new->as_pgtable1[i]);
 				if (result) {
-					lock_release(old->as_lock);
-					lock_release(new->as_lock);
+					old->as_pgtable1[i] &= ~PG_BUSY;
 					as_destroy(new);
 					return result;
 				}
@@ -698,29 +762,27 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
 			} else if (old->as_pgtable1[i] & PG_SWAP) {
-				new->as_pgtable1[i] = PG_VALID | PG_DIRTY;
 
-				result = coremap_getpage(&new->as_pgtable1[i]);
+				result = sw_pagein(&new->as_pgtable1[i]);
 				if (result) {
-					lock_release(old->as_lock);
-					lock_release(new->as_lock);
+					old->as_pgtable1[i] &= ~PG_BUSY;
 					as_destroy(new);
 					return result;
 				}
-
-				/* Swap in data from disk to new pgtable entry */
 				
 			} else { 
-				KASSERT(old->as_pgtable1[i] == 0);
+				KASSERT(old->as_pgtable1[i] & PG_BUSY);
 			}
+
+			old->as_pgtable1[i] &= ~PG_BUSY;
+			new->as_pgtable1[i] &= ~PG_BUSY;
+
 		}
 	}
 
 	if (old->as_pgtable2 != NULL) {
 		new->as_pgtable2 = kmalloc(new->as_npages2 * sizeof(int));
 		if (new->as_pgtable2 == NULL) {
-			lock_release(old->as_lock);
-			lock_release(new->as_lock);
 			as_destroy(new);
 			return ENOMEM;
 		}
@@ -730,17 +792,25 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		}
 
 		for (unsigned long i=0; i<old->as_npages2; i++) {
+
+			lock_acquire(old->as_lock);
+
 			while (old->as_pgtable2[i] & PG_BUSY) {
 				cv_wait(old->as_cv, old->as_lock);
 			}
 
+			old->as_pgtable2[i] |= PG_BUSY;
+
+			lock_release(old->as_lock);
+
+			new->as_pgtable2[i] = PG_VALID | PG_DIRTY |
+			PG_BUSY;
+
 			if (old->as_pgtable2[i] & PG_VALID) {
-				new->as_pgtable2[i] = PG_VALID | PG_DIRTY;
 
 				result = coremap_getpage(&new->as_pgtable2[i]);
 				if (result) {
-					lock_release(old->as_lock);
-					lock_release(new->as_lock);
+					old->as_pgtable2[i] &= ~PG_BUSY;
 					as_destroy(new);
 					return result;
 				}
@@ -758,92 +828,27 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
 			} else if (old->as_pgtable2[i] & PG_SWAP) {
-				new->as_pgtable2[i] = PG_VALID | PG_DIRTY;
 
-				result = coremap_getpage(&new->as_pgtable2[i]);
+				result = sw_pagein(&new->as_pgtable2[i]);
 				if (result) {
-					lock_release(old->as_lock);
-					lock_release(new->as_lock);
+					old->as_pgtable2[i] &= ~PG_BUSY;
 					as_destroy(new);
 					return result;
 				}
-
-				/* Swap in data from disk to new pgtable entry */
 				
 			} else { 
-				KASSERT(old->as_pgtable2[i] == 0);
-			}
-		}
-
-	}
-
-	if (old->as_stackpgtable != NULL) {
-		new->as_stackpgtable = kmalloc(new->as_stacksz * sizeof(int));
-		if (new->as_stackpgtable == NULL) {
-			lock_release(old->as_lock);
-			lock_release(new->as_lock);
-			as_destroy(new);
-			return ENOMEM;
-		}
-
-		for (int i=0; i<new->as_stacksz; i++) {
-			new->as_stackpgtable[i] = 0;
-		}
-
-		for (int i=0; i<old->as_stacksz; i++) {
-			while (old->as_stackpgtable[i] & PG_BUSY) {
-				cv_wait(old->as_cv, old->as_lock);
+				KASSERT(old->as_pgtable2[i] & PG_BUSY);
 			}
 
-			if (old->as_stackpgtable[i] & PG_VALID) {
-				new->as_stackpgtable[i] = PG_VALID | PG_DIRTY;
-
-				result = coremap_getpage(&new->as_stackpgtable[i]);
-				if (result) {
-					lock_release(old->as_lock);
-					lock_release(new->as_lock);
-					as_destroy(new);
-					return result;
-				}
-
-				new_paddr = (paddr_t)((new->as_stackpgtable[i] &
-				PG_FRAME)
-				<< 12);
-
-		
-				old_paddr = (paddr_t)((old->as_stackpgtable[i] &
-				PG_FRAME)
-				<< 12);
-
-				memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void
-				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
-
-			} else if (old->as_stackpgtable[i] & PG_SWAP) {
-				new->as_stackpgtable[i] = PG_VALID | PG_DIRTY;
-
-				result = coremap_getpage(&new->as_stackpgtable[i]);
-				if (result) {
-					lock_release(old->as_lock);
-					lock_release(new->as_lock);
-					as_destroy(new);
-					return result;
-				}
-
-				/* Swap in data from disk to new pgtable entry */
-				
-			} else {
-				KASSERT(old->as_stackpgtable[i] == 0);
-			}
+			old->as_pgtable2[i] &= ~PG_BUSY;
+			new->as_pgtable2[i] &= ~PG_BUSY;
 
 		}
-
 	}
 
 	if (old->as_heappgtable != NULL) {
 		new->as_heappgtable = kmalloc(new->as_heapsz * sizeof(int));
 		if (new->as_heappgtable == NULL) {
-			lock_release(old->as_lock);
-			lock_release(new->as_lock);
 			as_destroy(new);
 			return ENOMEM;
 		}
@@ -853,17 +858,25 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		}
 
 		for (int i=0; i<old->as_heapsz; i++) {
+
+			lock_acquire(old->as_lock);
+
 			while (old->as_heappgtable[i] & PG_BUSY) {
 				cv_wait(old->as_cv, old->as_lock);
 			}
 
+			old->as_heappgtable[i] |= PG_BUSY;
+
+			lock_release(old->as_lock);
+
+			new->as_heappgtable[i] = PG_VALID | PG_DIRTY |
+			PG_BUSY;
+
 			if (old->as_heappgtable[i] & PG_VALID) {
-				new->as_heappgtable[i] = PG_VALID | PG_DIRTY;
 
 				result = coremap_getpage(&new->as_heappgtable[i]);
 				if (result) {
-					lock_release(old->as_lock);
-					lock_release(new->as_lock);
+					old->as_heappgtable[i] &= ~PG_BUSY;
 					as_destroy(new);
 					return result;
 				}
@@ -881,28 +894,92 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
 			} else if (old->as_heappgtable[i] & PG_SWAP) {
-				new->as_heappgtable[i] = PG_VALID | PG_DIRTY;
 
-				result = coremap_getpage(&new->as_heappgtable[i]);
+				result = sw_pagein(&new->as_heappgtable[i]);
 				if (result) {
-					lock_release(old->as_lock);
-					lock_release(new->as_lock);
+					old->as_heappgtable[i] &= ~PG_BUSY;
+					as_destroy(new);
+					return result;
+				}
+				
+			} else {
+				KASSERT(old->as_heappgtable[i] == PG_BUSY);
+				new->as_heappgtable[i] = 0;
+			}
+
+			old->as_heappgtable[i] &= ~PG_BUSY;
+			new->as_heappgtable[i] &= ~PG_BUSY;
+
+		}
+	}
+
+	if (old->as_stackpgtable != NULL) {
+		new->as_stackpgtable = kmalloc(new->as_stacksz * sizeof(int));
+		if (new->as_stackpgtable == NULL) {
+			as_destroy(new);
+			return ENOMEM;
+		}
+
+		for (int i=0; i<new->as_stacksz; i++) {
+			new->as_stackpgtable[i] = 0;
+		}
+
+		for (int i=0; i<old->as_stacksz; i++) {
+
+			lock_acquire(old->as_lock);
+
+			while (old->as_stackpgtable[i] & PG_BUSY) {
+				cv_wait(old->as_cv, old->as_lock);
+			}
+
+			old->as_stackpgtable[i] |= PG_BUSY;
+
+			lock_release(old->as_lock);
+
+			new->as_stackpgtable[i] = PG_VALID | PG_DIRTY |
+			PG_BUSY;
+
+			if (old->as_stackpgtable[i] & PG_VALID) {
+
+				result = coremap_getpage(&new->as_stackpgtable[i]);
+				if (result) {
+					old->as_stackpgtable[i] &= ~PG_BUSY;
 					as_destroy(new);
 					return result;
 				}
 
-				/* Swap in data from disk to new pgtable entry */
+				new_paddr = (paddr_t)((new->as_stackpgtable[i] &
+				PG_FRAME)
+				<< 12);
+
+		
+				old_paddr = (paddr_t)((old->as_stackpgtable[i] &
+				PG_FRAME)
+				<< 12);
+
+				memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void
+				*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
+
+			} else if (old->as_stackpgtable[i] & PG_SWAP) {
+
+				result = sw_pagein(&new->as_stackpgtable[i]);
+				if (result) {
+					old->as_stackpgtable[i] &= ~PG_BUSY;
+					as_destroy(new);
+					return result;
+				}
 				
-			} else {
-				KASSERT(old->as_heappgtable[i] == 0);
+			} else { 
+				KASSERT(old->as_stackpgtable[i] == PG_BUSY);
+				new->as_stackpgtable[i] = 0;
 			}
 
-		}
+			old->as_stackpgtable[i] &= ~PG_BUSY;
+			new->as_stackpgtable[i] &= ~PG_BUSY;
 
+		}
 	}
 
-	lock_release(old->as_lock);
-	lock_release(new->as_lock);
 	*ret = new;
 	return 0;
 }
