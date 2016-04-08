@@ -42,6 +42,7 @@
 #include <addrspace.h>
 #include <kern/fcntl.h>
 #include <kern/errno.h>
+#include <lamebus/lhd.h>
 #include <swap.h>
 
 struct swap *kswap;
@@ -86,31 +87,31 @@ sw_bootstrap(void) {
 		panic("bitmap_create in sw_bootstrap failed\n");
 	}
 
-/*
-	char swap_str[]="lhd0raw:";
-	char *kswapfile = kmalloc(sizeof(*swap_str));
-	strcpy(kswapfile, swap_str);
-*/	
-	result = vfs_open((char *)"lhd0raw:", O_RDWR, 0, &kswap->sw_file);
+	char swap_file_name[]="lhd0raw:";
+	result = vfs_open(swap_file_name, O_RDWR, 0, &kswap->sw_file);
 	if (result) {
 		panic("vfs_open in sw_bootstrap failed\n");
 	}
 
-//	kfree(kswapfile);
-
-	swap_test();
+//	swap_test();
 
 	kswap->sw_ts = kmalloc(sizeof(const struct tlbshootdown));
 	if (kswap->sw_ts == NULL) {
 		panic("kmalloc in sw_bootstrap failed\n");
 	}
 
-	kswap->sw_lock = lock_create("swap lock");
-	if (kswap->sw_lock == NULL) {
+	kswap->sw_pglock = lock_create("swap lock");
+	if (kswap->sw_pglock == NULL) {
 		panic("lock_create in sw_bootstrap failed\n");
 	}
+
 	kswap->sw_disklock = lock_create("swap disk lock");
 	if (kswap->sw_disklock == NULL) {
+		panic("lock_create in sw_bootstrap failed\n");
+	}
+
+	kswap->sw_diskio_lock = lock_create("swap disk io lock");
+	if (kswap->sw_diskio_lock == NULL) {
 		panic("lock_create in sw_bootstrap failed\n");
 	}
 
@@ -142,11 +143,11 @@ sw_mv_clkhand(void *p, unsigned long arg) {
 				bitmap_unmark(kswap->sw_lruclk->l_clkface, hand);
 
 			} else {
-				lock_acquire(kswap->sw_lock);
+				lock_acquire(kswap->sw_pglock);
 				kswap->sw_pgavail = true;
 				kswap->sw_pgvictim = (paddr_t)(hand*PAGE_SIZE);
-				cv_signal(kswap->sw_cv, kswap->sw_lock);
-				lock_release(kswap->sw_lock);
+				cv_signal(kswap->sw_cv, kswap->sw_pglock);
+				lock_release(kswap->sw_pglock);
 				
 			}
 
@@ -163,17 +164,17 @@ sw_getpage(paddr_t *paddr) {
 
 	while(1) {
 /*
-		lock_acquire(kswap->sw_lock);
+		lock_acquire(kswap->sw_pglock);
 
 		while (!kswap->sw_pgavail) {
 			spinlock_release(&coremap->c_spinlock);
-			cv_wait(kswap->sw_cv, kswap->sw_lock);
+			cv_wait(kswap->sw_cv, kswap->sw_pglock);
 			spinlock_acquire(&coremap->c_spinlock);
 		}
 		
 		*paddr = kswap->sw_pgvictim;
 		kswap->sw_pgavail = false;
-		lock_release(kswap->sw_lock);
+		lock_release(kswap->sw_pglock);
 		index = (int)(*paddr/PAGE_SIZE);
 */
 
@@ -186,10 +187,13 @@ sw_getpage(paddr_t *paddr) {
 			continue;
 
 		} else {
+			KASSERT(sw_check(coremap->c_entries[index].ce_pgentry,
+			coremap->c_entries[index].ce_addrspace));
 
 			lock_acquire(coremap->c_entries[index].ce_addrspace->as_lock);
 			
-			if (*coremap->c_entries[index].ce_pgentry & PG_BUSY) {
+			if (*coremap->c_entries[index].ce_pgentry & PG_BUSY ||
+			!(*coremap->c_entries[index].ce_pgentry & PG_VALID)) {
 				lock_release(coremap->c_entries[index].ce_addrspace->as_lock);
 				continue;
 			}
@@ -221,6 +225,9 @@ sw_evictpage(paddr_t paddr) {
 	KASSERT(coremap->c_entries[index].ce_foruser);
 	KASSERT(!(*coremap->c_entries[index].ce_pgentry & PG_SWAP));
 	KASSERT(*coremap->c_entries[index].ce_pgentry & PG_BUSY);
+	KASSERT(*coremap->c_entries[index].ce_pgentry & PG_VALID);
+	KASSERT((paddr_t)((*coremap->c_entries[index].ce_pgentry & PG_FRAME) <<
+	12) == paddr);
 
 	spinlock_release(&coremap->c_spinlock);
 	ce_aslock = coremap->c_entries[index].ce_addrspace->as_lock;
@@ -236,6 +243,7 @@ sw_evictpage(paddr_t paddr) {
 			spinlock_acquire(&coremap->c_spinlock);
 			return ENOMEM;
 		}
+
 		lock_release(kswap->sw_disklock);
 
 	}
@@ -244,9 +252,11 @@ sw_evictpage(paddr_t paddr) {
 	vm_tlbshootdown(kswap->sw_ts);
 
 	if (*coremap->c_entries[index].ce_pgentry & PG_DIRTY) {
+//		lock_acquire(kswap->sw_diskio_lock);
 		uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE,
 		(off_t)(sw_offset*PAGE_SIZE), UIO_WRITE);
 		result = VOP_WRITE(kswap->sw_file, &ku);
+//		lock_release(kswap->sw_diskio_lock);
 		if (result) {
 			*coremap->c_entries[index].ce_pgentry &= ~PG_BUSY;
 			cv_signal(ce_ascv, ce_aslock);
@@ -268,7 +278,7 @@ sw_evictpage(paddr_t paddr) {
 }
 
 int
-sw_pagein(int *pg_entry) {
+sw_pagein(int *pg_entry, struct addrspace *as) {
 	paddr_t paddr;
 	off_t sw_offset;
 	int result;
@@ -276,10 +286,12 @@ sw_pagein(int *pg_entry) {
 	struct uio ku;
 	struct iovec iov;
 
+	KASSERT(sw_check(pg_entry, as));
+
 	sw_offset = (off_t)((*pg_entry & PG_FRAME) * PAGE_SIZE);
 	saved_entry = *pg_entry;
 
-	result = coremap_getpage(pg_entry);
+	result = coremap_getpage(pg_entry, as);
 	if (result) {
 		*pg_entry = saved_entry;
 		return result;
@@ -289,7 +301,7 @@ sw_pagein(int *pg_entry) {
 	uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE,
 	sw_offset, UIO_READ);
 
-	result = VOP_WRITE(kswap->sw_file, &ku);
+	result = VOP_READ(kswap->sw_file, &ku);
 	if (result) {
 		*pg_entry = saved_entry;
 		return result;
@@ -299,10 +311,10 @@ sw_pagein(int *pg_entry) {
 	bitmap_unmark(kswap->sw_diskoffset, (unsigned)(sw_offset/PAGE_SIZE));
 	lock_release(kswap->sw_disklock);
 
+	*pg_entry &= ~PG_SWAP;
 	*pg_entry |= PG_VALID;
 	*pg_entry |= PG_DIRTY;
-	*pg_entry |= PG_BUSY;
-	*pg_entry &= ~PG_SWAP;
+
 	return 0;
 }
 
@@ -312,25 +324,20 @@ swap_test(void) {
 	struct iovec iov;
 
 	int result;
-	char test[10] = "1234567890";
+	int write[LHD_SECTSIZE];
+	int read[LHD_SECTSIZE];
 
-	char *write = kmalloc(10*sizeof(char));
-	
-	for (int i=0; i<10; i++) {
-		memcpy((void *)&write[i], (const void *)&test[i], sizeof(char));
+	for (int i=0; i<LHD_SECTSIZE; i++) {
+		write[i] = i;
 	}
 
-//	write[10] = '\000';
 	uio_kinit(&iov, &ku, write, sizeof(write),
 	0, UIO_WRITE);
-	result = kswap->sw_file->vn_ops->vop_write(kswap->sw_file, &ku);
+	result = VOP_WRITE(kswap->sw_file, &ku);
 	if (result) {
 		panic("Write failed in swap_test\n");
 	}
 
-	kfree(write);
-
-/*
 	uio_kinit(&iov, &ku, read, sizeof(read),
 	0, UIO_READ);
 	result = VOP_READ(kswap->sw_file, &ku);
@@ -338,11 +345,49 @@ swap_test(void) {
 		panic("Read failed in swap_test\n");
 	}
 
-
-	for (int i=0; i<10; i++) {
-		if (read[i] != i) {
-			panic("Read did not match write in swap test\n");
+	for (int i=0; i<LHD_SECTSIZE; i++) {
+		if (read[i] != write[i]) {
+			panic("Mismatch in swap_test\n");
 		}
 	}
-*/
+}
+
+bool
+sw_check(int *pg_entry, struct addrspace *as) {
+	unsigned long as_npages1;
+	unsigned long as_npages2;
+	int as_stacksz;
+	int as_heapsz;
+
+	as_npages1 = as->as_npages1;
+	as_npages2 = as->as_npages2;
+	as_stacksz = as->as_stacksz;
+	as_heapsz = as->as_heapsz;
+
+	for (unsigned long i=0; i<as_npages1; i++) {
+		if (&as->as_pgtable1[i] == pg_entry) {
+			return true;
+		}
+	}
+
+	for (unsigned long i=0; i<as_npages2; i++) {
+		if (&as->as_pgtable2[i] == pg_entry) {
+			return true;
+		}
+	}
+
+	for (int i=0; i<as_heapsz; i++) {
+		if (&as->as_heappgtable[i] == pg_entry) {
+			return true;
+		}
+	}
+
+	for (int i=0; i<as_stacksz; i++) {
+		if (&as->as_stackpgtable[i] == pg_entry) {
+			return true;
+		}
+	}
+
+	return false;
+
 }
