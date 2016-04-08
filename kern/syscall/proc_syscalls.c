@@ -41,6 +41,8 @@
 #include <coremap.h>
 #include <addrspace.h>
 #include <thread.h>
+#include <bitmap.h>
+#include <swap.h>
 #include <proc.h>
 #include <kern/wait.h>
 #include <kern/errno.h>
@@ -706,8 +708,10 @@ sys_sbrk(intptr_t amount, void *retval)  {
 	vaddr_t htop;
 	vaddr_t retaddr;
 	paddr_t paddr;
+	int c_index;
 	struct tlbshootdown *ts;
 	struct addrspace *as;
+	unsigned sw_offset;
 
 	as = proc_getas();
 
@@ -720,7 +724,6 @@ sys_sbrk(intptr_t amount, void *retval)  {
 		return EINVAL;
 
 	} else if (htop <= as->as_stackptr) {
-		lock_acquire(as->as_lock);
 
 		as->as_heaptop = htop;
 		
@@ -732,9 +735,16 @@ sys_sbrk(intptr_t amount, void *retval)  {
 		if (npages < as->as_heapsz && as->as_heappgtable != NULL) {
 			
 			for (int i=npages; i<as->as_heapsz; i++) {
+
+				lock_acquire(as->as_lock);
+
 				while (as->as_heappgtable[i] & PG_BUSY) {
 					cv_wait(as->as_cv, as->as_lock);
 				}
+
+				as->as_heappgtable[i] |= PG_BUSY;
+
+				lock_release(as->as_lock);
 
 				if (as->as_heappgtable[i] & PG_VALID) {
 					paddr =
@@ -743,7 +753,6 @@ sys_sbrk(intptr_t amount, void *retval)  {
 					ts = kmalloc(sizeof(const struct
 					tlbshootdown));
 					if (ts == NULL) {
-						lock_release(as->as_lock);
 						*(vaddr_t *)retval = -1;
 						return ENOMEM;
 					}
@@ -751,15 +760,22 @@ sys_sbrk(intptr_t amount, void *retval)  {
 					vm_tlbshootdown(ts);
 					kfree(ts);
 							
-					as->as_heappgtable[i] = 0;
-							
 				} else if (as->as_heappgtable[i] & PG_SWAP) {
-			
-					/* MARK DISK OFFSET AS FREE */
+					
+					sw_offset =
+					(unsigned)(as->as_heappgtable[i] &
+					PG_FRAME);
+					
+					lock_acquire(kswap->sw_disklock);
+					bitmap_unmark(kswap->sw_diskoffset,
+					sw_offset);
+					lock_release(kswap->sw_disklock); 
 
+				} else {
+					KASSERT(as->as_heappgtable[i] == PG_BUSY);
 				}
 
-				KASSERT(as->as_heappgtable[i] == 0);
+				as->as_heappgtable[i] = 0;
 			}
 		}
 
@@ -770,22 +786,67 @@ sys_sbrk(intptr_t amount, void *retval)  {
 
 			int *heap_temp = kmalloc(as->as_heapsz/2*sizeof(int));
 			if (heap_temp == NULL) {
-				lock_release(as->as_lock);
 				return ENOMEM;
 			}
 			
 			for (int i=0; i<as->as_heapsz/2; i++) {
 				heap_temp[i] = 0;
 			}
+
+			for (int i=0; i<npages; i++) {
+				lock_acquire(as->as_lock);
+				while (as->as_heappgtable[i] & PG_BUSY) {
+					cv_wait(as->as_cv, as->as_lock);
+				}
+
+				as->as_heappgtable[i] |= PG_BUSY;
+				lock_release(as->as_lock);
+
+				if (as->as_heappgtable[i] & PG_VALID) {
+					paddr = (paddr_t)((as->as_heappgtable[i]
+					& PG_FRAME) << 12);
+					c_index = (int)(paddr/PAGE_SIZE);
+					spinlock_acquire(&coremap->c_spinlock);
+					KASSERT(coremap->c_entries[c_index].ce_addrspace
+					== as);
+					KASSERT(coremap->c_entries[c_index].ce_pgentry
+					== &as->as_heappgtable[i]);
+					memcpy(&heap_temp[i],
+					&as->as_heappgtable[i], sizeof(int));
+					coremap->c_entries[c_index].ce_pgentry =
+					&heap_temp[i];
+					spinlock_release(&coremap->c_spinlock);
+
+				} else {
+					KASSERT(as->as_heappgtable[i] &
+					PG_SWAP);
+
+					memcpy(&heap_temp[i],
+					&as->as_heappgtable[i], sizeof(int));
+				}
+
+				heap_temp[i] &= ~PG_BUSY;
+			}
 			
-			memcpy(heap_temp, as->as_heappgtable,
-			npages*sizeof(int));
 			kfree(as->as_heappgtable);
 			as->as_heappgtable = heap_temp;
 			as->as_heapsz/=2;	
 		}
+
+/*
+		if (as->as_heappgtable != NULL) {
+			for (int i=0; i<as->as_heapsz; i++) {
+				if (as->as_heappgtable[i] & PG_VALID) {
+					paddr = (paddr_t)((as->as_heappgtable[i] & PG_FRAME) <<
+					12);
+					c_index = (int)(paddr/PAGE_SIZE);
+					KASSERT(sw_check(coremap->c_entries[c_index].ce_pgentry,
+					coremap->c_entries[c_index].ce_addrspace));
+				}
+			}
+		}
+*/
 		 
-		lock_release(as->as_lock);
 		*(vaddr_t *)retval = retaddr;
 		return 0;
 
