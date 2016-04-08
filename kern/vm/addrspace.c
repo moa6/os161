@@ -37,6 +37,8 @@
 #include <proc.h>
 #include <current.h>
 #include <mips/tlb.h>
+#include <uio.h>
+#include <vnode.h>
 #include <bitmap.h>
 #include <swap.h>
 #include <coremap.h>
@@ -51,8 +53,8 @@ static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
 void
 vm_bootstrap(void)
 {
-	sw_bootstrap();
 	coremap_bootstrap();
+	sw_bootstrap();
 }
 
 static
@@ -138,6 +140,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	int sz;
 	int result;
 //	unsigned lru_index;
+	int c_index;
 	signed long index;
 	unsigned long npages;
 	vaddr_t vbase1, vtop1, vbase2, vtop2, stacktop, heaptop, stacklimit;
@@ -222,13 +225,47 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 			for (int i=0; i<2*sz; i++) {
 				stack_temp[i] = 0;
 			}
+
+			for (int i=0; i<as->as_stacksz; i++) {
+				lock_acquire(as->as_lock);
+				while(as->as_stackpgtable[i] & PG_BUSY) {
+					cv_wait(as->as_cv, as->as_lock);
+				}
+
+				as->as_stackpgtable[i] |= PG_BUSY;
+				lock_release(as->as_lock);
+
+				if (as->as_stackpgtable[i] & PG_VALID) {
+					paddr = (paddr_t)((as->as_stackpgtable[i] & PG_FRAME) << 12);
+					c_index = (int)(paddr/PAGE_SIZE);
+					spinlock_acquire(&coremap->c_spinlock);
+					KASSERT(coremap->c_entries[c_index].ce_addrspace
+					== as);
+					KASSERT(coremap->c_entries[c_index].ce_pgentry
+					== &as->as_stackpgtable[i]);
+					memcpy(&stack_temp[i],
+					&as->as_stackpgtable[i], sizeof(int));
+					coremap->c_entries[c_index].ce_pgentry =
+					&stack_temp[i];
+					spinlock_release(&coremap->c_spinlock);
+
+				} else {
+					KASSERT(as->as_stackpgtable[i] &
+					PG_SWAP);
+					
+					memcpy(&stack_temp[i],
+					&as->as_stackpgtable[i], sizeof(int));
+
+				}
+
+				stack_temp[i] &= ~PG_BUSY;
+			}
 			
-			memcpy(stack_temp, as->as_stackpgtable, as->as_stacksz*sizeof(int));
 			kfree(as->as_stackpgtable);
 			as->as_stackpgtable = stack_temp;
 			sz *=2;
 		}
-
+	
 		as->as_stacksz = sz;
 
 		if (stacktop - (index+1)*PAGE_SIZE < as->as_stackptr) {
@@ -266,8 +303,42 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 			for (int i=0; i<2*sz; i++) {
 				heap_temp[i] = 0;
 			}
+
+			for (int i=0; i<as->as_heapsz; i++) {
+				lock_acquire(as->as_lock);
+				while(as->as_heappgtable[i] & PG_BUSY) {
+					cv_wait(as->as_cv, as->as_lock);
+				}
+
+				as->as_heappgtable[i] |= PG_BUSY;
+				lock_release(as->as_lock);
+
+				if (as->as_heappgtable[i] & PG_VALID) {
+					paddr = (paddr_t)((as->as_heappgtable[i] & PG_FRAME) << 12);
+					c_index = (int)(paddr/PAGE_SIZE);
+					spinlock_acquire(&coremap->c_spinlock);
+					KASSERT(coremap->c_entries[c_index].ce_addrspace
+					== as);
+					KASSERT(coremap->c_entries[c_index].ce_pgentry
+					== &as->as_heappgtable[i]);
+					memcpy(&heap_temp[i],
+					&as->as_heappgtable[i], sizeof(int));
+					coremap->c_entries[c_index].ce_pgentry =
+					&heap_temp[i];
+					spinlock_release(&coremap->c_spinlock);
+
+				} else {
+					KASSERT(as->as_heappgtable[i] &
+					PG_SWAP);
+					
+					memcpy(&heap_temp[i],
+					&as->as_heappgtable[i], sizeof(int));
+
+				}
+
+				heap_temp[i] &= ~PG_BUSY;
+			}
 			
-			memcpy(heap_temp, as->as_heappgtable, as->as_heapsz*sizeof(int));
 			kfree(as->as_heappgtable);
 			as->as_heappgtable = heap_temp;
 			sz *=2;
@@ -275,6 +346,18 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 		as->as_heapsz = sz;
 
+/*
+		for (int i=0; i<as->as_heapsz; i++) {
+			if (as->as_heappgtable[i] & PG_VALID) {
+				paddr = (paddr_t)((as->as_heappgtable[i] & PG_FRAME) << 12);
+				c_index = (int)(paddr/PAGE_SIZE);
+				KASSERT(sw_check(coremap->c_entries[c_index].ce_pgentry,
+				coremap->c_entries[c_index].ce_addrspace));
+				
+			}
+
+		}
+*/
 		npages = (unsigned long)(((heaptop & PAGE_FRAME) - vtop2) / PAGE_SIZE);
 		if (heaptop & ~PAGE_FRAME) {
 			npages++;
@@ -315,26 +398,35 @@ fetchpaddr:
 		
 		lock_release(as->as_lock);
 	
-		result = sw_pagein(&pgtable[index]);
+		result = sw_pagein(&pgtable[index], as);
 		if (result) {
 			pgtable[index] &= ~PG_BUSY;
 			lock_release(as->as_lock);
 			return result;
 		}
+
+		lock_acquire(as->as_lock);
+
+		paddr = (paddr_t)((pgtable[index] & PG_FRAME) << 12);
 		
 	} else if (pgtable[index] == 0) {
 		pgtable[index] = PG_VALID | PG_DIRTY | PG_BUSY;
 
 		lock_release(as->as_lock);
 
-		result = coremap_getpage(&pgtable[index]);
+		result = coremap_getpage(&pgtable[index], as);
 		if (result) {
 			pgtable[index] = 0;
 			lock_release(as->as_lock);
 			return result;
 		}
 
+		lock_acquire(as->as_lock);
+		
 		paddr = (paddr_t)((pgtable[index] & PG_FRAME) << 12);
+		c_index = (int)(paddr/PAGE_SIZE);
+//		KASSERT(sw_check(coremap->c_entries[c_index].ce_pgentry,
+//		coremap->c_entries[c_index].ce_addrspace));
 		bzero((void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE);
 
 	} else {
@@ -381,14 +473,13 @@ fetchpaddr:
 	} 
 	spinlock_release(&kswap->sw_lruclk->l_spinlock);	
 */
-	if (lock_do_i_hold(as->as_lock)) {
-		lock_release(as->as_lock);
-	}
 
 	if (pgtable[index] & PG_BUSY) {
 		pgtable[index] &= ~PG_BUSY;
 	}
-//	cv_signal(as->as_cv, as->as_lock);
+
+	cv_signal(as->as_cv, as->as_lock);
+	lock_release(as->as_lock);
 	return 0;
 }
 
@@ -698,7 +789,10 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	int result;
 	paddr_t old_paddr;
 	paddr_t new_paddr;
+	off_t old_sw_offset;
 	struct addrspace *new;
+	struct uio ku;
+	struct iovec iov;
 
 	new = as_create();
 	if (new==NULL) {
@@ -742,7 +836,8 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 			if (old->as_pgtable1[i] & PG_VALID) {
 
-				result = coremap_getpage(&new->as_pgtable1[i]);
+				result = coremap_getpage(&new->as_pgtable1[i],
+				new);
 				if (result) {
 					old->as_pgtable1[i] &= ~PG_BUSY;
 					as_destroy(new);
@@ -763,7 +858,24 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 			} else if (old->as_pgtable1[i] & PG_SWAP) {
 
-				result = sw_pagein(&new->as_pgtable1[i]);
+				old_sw_offset = (off_t)((old->as_pgtable1[i] &
+				PG_FRAME) * PAGE_SIZE);
+
+				result = coremap_getpage(&new->as_pgtable1[i],
+				new);
+				if (result) {
+					old->as_pgtable1[i] &= ~PG_BUSY;
+					as_destroy(new);
+					return result;
+				}
+
+				new_paddr = (paddr_t)((new->as_pgtable1[i] &
+				PG_FRAME)
+				<< 12);
+				uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(new_paddr), PAGE_SIZE,
+				old_sw_offset, UIO_READ);
+
+				result = VOP_READ(kswap->sw_file, &ku);
 				if (result) {
 					old->as_pgtable1[i] &= ~PG_BUSY;
 					as_destroy(new);
@@ -808,7 +920,8 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 			if (old->as_pgtable2[i] & PG_VALID) {
 
-				result = coremap_getpage(&new->as_pgtable2[i]);
+				result = coremap_getpage(&new->as_pgtable2[i],
+				new);
 				if (result) {
 					old->as_pgtable2[i] &= ~PG_BUSY;
 					as_destroy(new);
@@ -829,12 +942,31 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 			} else if (old->as_pgtable2[i] & PG_SWAP) {
 
-				result = sw_pagein(&new->as_pgtable2[i]);
+				old_sw_offset = (off_t)((old->as_pgtable2[i] &
+				PG_FRAME) * PAGE_SIZE);
+
+				result = coremap_getpage(&new->as_pgtable2[i],
+				new);
 				if (result) {
 					old->as_pgtable2[i] &= ~PG_BUSY;
 					as_destroy(new);
 					return result;
 				}
+
+				new_paddr = (paddr_t)((new->as_pgtable2[i] &
+				PG_FRAME)
+				<< 12);
+				uio_kinit(&iov, &ku, (void
+				*)PADDR_TO_KVADDR(new_paddr), PAGE_SIZE,
+				old_sw_offset, UIO_READ);
+
+				result = VOP_READ(kswap->sw_file, &ku);
+				if (result) {
+					old->as_pgtable2[i] &= ~PG_BUSY;
+					as_destroy(new);
+					return result;
+				}
+
 				
 			} else { 
 				KASSERT(old->as_pgtable2[i] & PG_BUSY);
@@ -874,7 +1006,7 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 			if (old->as_heappgtable[i] & PG_VALID) {
 
-				result = coremap_getpage(&new->as_heappgtable[i]);
+				result = coremap_getpage(&new->as_heappgtable[i], new);
 				if (result) {
 					old->as_heappgtable[i] &= ~PG_BUSY;
 					as_destroy(new);
@@ -895,12 +1027,32 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 			} else if (old->as_heappgtable[i] & PG_SWAP) {
 
-				result = sw_pagein(&new->as_heappgtable[i]);
+				old_sw_offset = (off_t)((old->as_heappgtable[i] &
+				PG_FRAME) * PAGE_SIZE);
+
+				result = coremap_getpage(&new->as_heappgtable[i],
+				new);
 				if (result) {
 					old->as_heappgtable[i] &= ~PG_BUSY;
 					as_destroy(new);
 					return result;
 				}
+
+				new_paddr = (paddr_t)((new->as_heappgtable[i] &
+				PG_FRAME)
+				<< 12);
+				uio_kinit(&iov, &ku, (void
+				*)PADDR_TO_KVADDR(new_paddr), PAGE_SIZE,
+				old_sw_offset, UIO_READ);
+
+				result = VOP_READ(kswap->sw_file, &ku);
+				if (result) {
+					old->as_heappgtable[i] &= ~PG_BUSY;
+					as_destroy(new);
+					return result;
+				}
+
+
 				
 			} else {
 				KASSERT(old->as_heappgtable[i] == PG_BUSY);
@@ -941,7 +1093,7 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 			if (old->as_stackpgtable[i] & PG_VALID) {
 
-				result = coremap_getpage(&new->as_stackpgtable[i]);
+				result = coremap_getpage(&new->as_stackpgtable[i], new);
 				if (result) {
 					old->as_stackpgtable[i] &= ~PG_BUSY;
 					as_destroy(new);
@@ -962,7 +1114,25 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 			} else if (old->as_stackpgtable[i] & PG_SWAP) {
 
-				result = sw_pagein(&new->as_stackpgtable[i]);
+				old_sw_offset = (off_t)((old->as_stackpgtable[i] &
+				PG_FRAME) * PAGE_SIZE);
+
+				result = coremap_getpage(&new->as_stackpgtable[i],
+				new);
+				if (result) {
+					old->as_stackpgtable[i] &= ~PG_BUSY;
+					as_destroy(new);
+					return result;
+				}
+
+				new_paddr = (paddr_t)((new->as_stackpgtable[i] &
+				PG_FRAME)
+				<< 12);
+				uio_kinit(&iov, &ku, (void
+				*)PADDR_TO_KVADDR(new_paddr), PAGE_SIZE,
+				old_sw_offset, UIO_READ);
+
+				result = VOP_READ(kswap->sw_file, &ku);
 				if (result) {
 					old->as_stackpgtable[i] &= ~PG_BUSY;
 					as_destroy(new);
