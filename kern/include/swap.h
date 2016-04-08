@@ -45,8 +45,9 @@ struct swap {
 	struct tlbshootdown *sw_ts;
 	paddr_t sw_pgvictim;
 	bool sw_pgavail;
-	struct lock *sw_lock;
+	struct lock *sw_pglock;
 	struct lock *sw_disklock;
+	struct lock *sw_diskio_lock;
 	struct cv *sw_cv;
 	struct vnode *sw_file;
 	struct bitmap *sw_diskoffset;
@@ -65,8 +66,9 @@ void sw_getpage(paddr_t *paddr);
 
 int sw_evictpage(paddr_t paddr);
 
-int sw_pagein(int *pg_entry);
+int sw_pagein(int *pg_entry, struct addrspace *as);
 
 void swap_test(void);
 
+bool sw_check(int *pg_entry, struct addrspace *as);
 #endif
