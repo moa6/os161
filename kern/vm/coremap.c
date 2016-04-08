@@ -317,18 +317,16 @@ coremap_getkpages(unsigned long npages) {
 }
 
 int
-coremap_getpage(int *pg_entry) {	
+coremap_getpage(int *pg_entry, struct addrspace *as) {	
 	KASSERT(pg_entry != NULL);
+	KASSERT(sw_check(pg_entry, as));
 
-	struct addrspace *as;
 	paddr_t paddr;
 	paddr_t pgvictim;
 	int index;
 	int result;
 	unsigned long total_npages;
 	unsigned long start;
-
-	as = proc_getas();
 
 	spinlock_acquire(&coremap->c_spinlock);
 	start = 0;
@@ -384,7 +382,7 @@ coremap_getpage(int *pg_entry) {
 	coremap->c_entries[index].ce_busy = false;
 
 	spinlock_release(&coremap->c_spinlock);
-	return ENOMEM;
+	return 0;
 }
 
 void
@@ -423,6 +421,8 @@ coremap_freepage(paddr_t pframe) {
 	spinlock_acquire(&coremap->c_spinlock);
 	index = (int)(pframe / PAGE_SIZE);
 
+	KASSERT(sw_check(coremap->c_entries[index].ce_pgentry,
+	coremap->c_entries[index].ce_addrspace));
 	KASSERT(coremap->c_entries[index].ce_allocated);
 	KASSERT(coremap->c_entries[index].ce_foruser);
 	KASSERT(!coremap->c_entries[index].ce_busy);
