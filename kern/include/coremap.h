@@ -60,7 +60,7 @@ bool coremap_ready(void);
 
 paddr_t coremap_getkpages(unsigned long npages);
 
-int coremap_getpage(int *pg_entry);
+int coremap_getpage(int *pg_entry, struct addrspace *as);
 
 void coremap_freekpages(paddr_t pframe);
 
