@@ -417,7 +417,6 @@ fetchpaddr:
 		result = coremap_getpage(&pgtable[index], as);
 		if (result) {
 			pgtable[index] = 0;
-			lock_release(as->as_lock);
 			return result;
 		}
 
@@ -839,7 +838,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				result = coremap_getpage(&new->as_pgtable1[i],
 				new);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_pgtable1[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -864,7 +865,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				result = coremap_getpage(&new->as_pgtable1[i],
 				new);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_pgtable1[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -877,7 +880,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 				result = VOP_READ(kswap->sw_file, &ku);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_pgtable1[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -886,8 +891,12 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				KASSERT(old->as_pgtable1[i] & PG_BUSY);
 			}
 
+			lock_acquire(old->as_lock);
 			old->as_pgtable1[i] &= ~PG_BUSY;
+			lock_release(old->as_lock);
+			lock_acquire(new->as_lock);
 			new->as_pgtable1[i] &= ~PG_BUSY;
+			lock_release(new->as_lock);
 
 		}
 	}
@@ -923,7 +932,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				result = coremap_getpage(&new->as_pgtable2[i],
 				new);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_pgtable2[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -948,7 +959,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				result = coremap_getpage(&new->as_pgtable2[i],
 				new);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_pgtable2[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -962,7 +975,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 				result = VOP_READ(kswap->sw_file, &ku);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_pgtable2[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -972,8 +987,12 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				KASSERT(old->as_pgtable2[i] & PG_BUSY);
 			}
 
+			lock_acquire(old->as_lock);
 			old->as_pgtable2[i] &= ~PG_BUSY;
+			lock_release(old->as_lock);
+			lock_acquire(new->as_lock);
 			new->as_pgtable2[i] &= ~PG_BUSY;
+			lock_release(new->as_lock);
 
 		}
 	}
@@ -1008,7 +1027,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 				result = coremap_getpage(&new->as_heappgtable[i], new);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_heappgtable[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -1033,7 +1054,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				result = coremap_getpage(&new->as_heappgtable[i],
 				new);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_heappgtable[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -1047,7 +1070,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 				result = VOP_READ(kswap->sw_file, &ku);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_heappgtable[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -1059,8 +1084,12 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				new->as_heappgtable[i] = 0;
 			}
 
+			lock_acquire(old->as_lock);
 			old->as_heappgtable[i] &= ~PG_BUSY;
+			lock_release(old->as_lock);
+			lock_acquire(new->as_lock);
 			new->as_heappgtable[i] &= ~PG_BUSY;
+			lock_release(new->as_lock);
 
 		}
 	}
@@ -1095,7 +1124,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 				result = coremap_getpage(&new->as_stackpgtable[i], new);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_stackpgtable[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -1120,7 +1151,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				result = coremap_getpage(&new->as_stackpgtable[i],
 				new);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_stackpgtable[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -1134,7 +1167,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 				result = VOP_READ(kswap->sw_file, &ku);
 				if (result) {
+					lock_acquire(old->as_lock);
 					old->as_stackpgtable[i] &= ~PG_BUSY;
+					lock_release(old->as_lock);
 					as_destroy(new);
 					return result;
 				}
@@ -1144,8 +1179,12 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 				new->as_stackpgtable[i] = 0;
 			}
 
+			lock_acquire(old->as_lock);
 			old->as_stackpgtable[i] &= ~PG_BUSY;
+			lock_release(old->as_lock);
+			lock_acquire(new->as_lock);
 			new->as_stackpgtable[i] &= ~PG_BUSY;
+			lock_release(new->as_lock);
 
 		}
 	}
