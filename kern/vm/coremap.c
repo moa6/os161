@@ -178,6 +178,7 @@ coremap_getkpages(unsigned long npages) {
 		result = sw_evictpage(paddr);
 		if (result) {
 			coremap->c_entries[index].ce_busy = false;
+			spinlock(&coremap->
 			return result;
 		}
 		
