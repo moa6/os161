@@ -359,8 +359,7 @@ coremap_getpage(int *pg_entry, struct addrspace *as) {
 
 	sw_getpage(&pgvictim);
 	index = (int)(pgvictim/PAGE_SIZE);
-	KASSERT(!coremap->c_entries[index].ce_busy);
-	coremap->c_entries[index].ce_busy = true;
+	KASSERT(coremap->c_entries[index].ce_busy);
 	
 	result = sw_evictpage(pgvictim);
 	if (result) {
