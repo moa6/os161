@@ -158,11 +158,13 @@ sw_mv_clkhand(void *p, unsigned long arg) {
 
 void
 sw_getpage(paddr_t *paddr) {
-	KASSERT(spinlock_do_i_hold(&coremap->c_spinlock));
 
 	int index;
 
 	while(1) {
+
+		KASSERT(spinlock_do_i_hold(&coremap->c_spinlock));
+
 /*
 		lock_acquire(kswap->sw_pglock);
 
@@ -184,22 +186,33 @@ sw_getpage(paddr_t *paddr) {
 		if (!coremap->c_entries[index].ce_allocated ||
 		!coremap->c_entries[index].ce_foruser ||
 		coremap->c_entries[index].ce_busy) {
+			spinlock_release(&coremap->c_spinlock);
+			thread_yield();
+			spinlock_acquire(&coremap->c_spinlock);
 			continue;
 
 		} else {
+			coremap->c_entries[index].ce_busy = true;
 			KASSERT(sw_check(coremap->c_entries[index].ce_pgentry,
 			coremap->c_entries[index].ce_addrspace));
+			spinlock_release(&coremap->c_spinlock);
 
 			lock_acquire(coremap->c_entries[index].ce_addrspace->as_lock);
 			
 			if (*coremap->c_entries[index].ce_pgentry & PG_BUSY ||
 			!(*coremap->c_entries[index].ce_pgentry & PG_VALID)) {
 				lock_release(coremap->c_entries[index].ce_addrspace->as_lock);
+				spinlock_acquire(&coremap->c_spinlock);
+				coremap->c_entries[index].ce_busy = false;
+				spinlock_release(&coremap->c_spinlock);
+				thread_yield();
+				spinlock_acquire(&coremap->c_spinlock);
 				continue;
 			}
 
 			*coremap->c_entries[index].ce_pgentry |= PG_BUSY;
 			lock_release(coremap->c_entries[index].ce_addrspace->as_lock);
+			spinlock_acquire(&coremap->c_spinlock);
 			break;
 		}
 	}
@@ -252,18 +265,19 @@ sw_evictpage(paddr_t paddr) {
 	vm_tlbshootdown(kswap->sw_ts);
 
 	if (*coremap->c_entries[index].ce_pgentry & PG_DIRTY) {
-//		lock_acquire(kswap->sw_diskio_lock);
 		uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE,
 		(off_t)(sw_offset*PAGE_SIZE), UIO_WRITE);
 		result = VOP_WRITE(kswap->sw_file, &ku);
-//		lock_release(kswap->sw_diskio_lock);
 		if (result) {
+			lock_acquire(ce_aslock);
 			*coremap->c_entries[index].ce_pgentry &= ~PG_BUSY;
 			cv_signal(ce_ascv, ce_aslock);
+			lock_release(ce_aslock);
 			spinlock_acquire(&coremap->c_spinlock);
 			return result;
 		}	
-		
+	
+		lock_acquire(ce_aslock);	
 		*coremap->c_entries[index].ce_pgentry = PG_SWAP | (int)sw_offset;
 
 	} else {
@@ -273,6 +287,7 @@ sw_evictpage(paddr_t paddr) {
 	}
 
 	cv_signal(ce_ascv, ce_aslock);
+	lock_release(ce_aslock);
 	spinlock_acquire(&coremap->c_spinlock);
 	return 0;
 }
