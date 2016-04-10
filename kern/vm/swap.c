@@ -48,29 +48,6 @@
 struct swap *kswap;
 
 void
-sw_lruclk_create(void) {
-	unsigned nbits;
-
-	kswap->sw_lruclk = kmalloc(sizeof(struct lru_clk));
-	if (kswap->sw_lruclk == NULL) {
-		panic("kmalloc in sw_lruclk_create failed\n");
-	}
-
-	nbits = (unsigned)(ram_getsize()/PAGE_SIZE);
-	kswap->sw_lruclk->l_clkface = bitmap_create(nbits);
-	if (kswap->sw_lruclk->l_clkface == NULL) {
-		panic("bitmap_create in sw_lruclk_create failed\n");
-	}
-
-	kswap->sw_lruclk->l_npages = (unsigned long)nbits;
-
-	kswap->sw_lruclk->l_lock = lock_create("lru clk lock");
-	if (kswap->sw_lruclk->l_lock == NULL) {
-		panic("lock_create in sw_lruclk_create failed\n");
-	}
-} 
-
-void
 sw_bootstrap(void) {
 
 	int result;
@@ -79,8 +56,6 @@ sw_bootstrap(void) {
 	if (kswap == NULL) {
 		panic("kmalloc in sw_bootstrap failed\n");
 	}
-
-	sw_lruclk_create();
 
 	kswap->sw_diskoffset = bitmap_create((unsigned)SWAP_SIZE);
 	if (kswap->sw_diskoffset == NULL) {
@@ -110,11 +85,6 @@ sw_bootstrap(void) {
 		panic("lock_create in sw_bootstrap failed\n");
 	}
 
-	kswap->sw_diskio_lock = lock_create("swap disk io lock");
-	if (kswap->sw_diskio_lock == NULL) {
-		panic("lock_create in sw_bootstrap failed\n");
-	}
-
 	kswap->sw_cv = cv_create("swap cv");
 	if (kswap->sw_cv == NULL) {
 		panic("cv_create in sw_bootstrap failed\n");
@@ -131,164 +101,110 @@ sw_bootstrap(void) {
 }
 
 void
-sw_mv_clkhand(void *p, unsigned long arg) {
-	(void)p;
-	(void)arg;
-
-	while (1) {
-		for (unsigned hand=0; hand<(unsigned)kswap->sw_lruclk->l_npages; hand++) {
-			lock_acquire(kswap->sw_lruclk->l_lock);
-
-			if (bitmap_isset(kswap->sw_lruclk->l_clkface, hand)) {
-				bitmap_unmark(kswap->sw_lruclk->l_clkface, hand);
-
-			} else {
-				lock_acquire(kswap->sw_pglock);
-				kswap->sw_pgavail = true;
-				kswap->sw_pgvictim = (paddr_t)(hand*PAGE_SIZE);
-				cv_signal(kswap->sw_cv, kswap->sw_pglock);
-				lock_release(kswap->sw_pglock);
-				
-			}
-
-			lock_release(kswap->sw_lruclk->l_lock);
-		}
-	}
-}
-
-void
 sw_getpage(paddr_t *paddr) {
-
-	int index;
+	int c_index;
+	paddr_t evicted_paddr;
 
 	while(1) {
+		spinlock_acquire(&coremap->c_spinlock);
+	
+		c_index = (int)(random() % coremap->c_npages);
 
-		KASSERT(spinlock_do_i_hold(&coremap->c_spinlock));
-
-/*
-		lock_acquire(kswap->sw_pglock);
-
-		while (!kswap->sw_pgavail) {
+		if (!coremap->c_entries[c_index].ce_allocated ||
+		coremap->c_entries[c_index].ce_busy ||
+		!coremap->c_entries[c_index].ce_foruser) {
 			spinlock_release(&coremap->c_spinlock);
-			cv_wait(kswap->sw_cv, kswap->sw_pglock);
-			spinlock_acquire(&coremap->c_spinlock);
-		}
-		
-		*paddr = kswap->sw_pgvictim;
-		kswap->sw_pgavail = false;
-		lock_release(kswap->sw_pglock);
-		index = (int)(*paddr/PAGE_SIZE);
-*/
-
-		index = random() % coremap->c_npages;
-		*paddr = (paddr_t)(index*PAGE_SIZE);
-
-		if (!coremap->c_entries[index].ce_allocated ||
-		!coremap->c_entries[index].ce_foruser ||
-		coremap->c_entries[index].ce_busy) {
-			spinlock_release(&coremap->c_spinlock);
-			thread_yield();
-			spinlock_acquire(&coremap->c_spinlock);
+//			thread_yield();
 			continue;
 
 		} else {
-			coremap->c_entries[index].ce_busy = true;
-			KASSERT(sw_check(coremap->c_entries[index].ce_pgentry,
-			coremap->c_entries[index].ce_addrspace));
+			coremap->c_entries[c_index].ce_busy = true;
 			spinlock_release(&coremap->c_spinlock);
+			lock_acquire(coremap->c_entries[c_index].ce_addrspace->as_lock);
 
-			lock_acquire(coremap->c_entries[index].ce_addrspace->as_lock);
-			
-			if (*coremap->c_entries[index].ce_pgentry & PG_BUSY ||
-			!(*coremap->c_entries[index].ce_pgentry & PG_VALID)) {
-				lock_release(coremap->c_entries[index].ce_addrspace->as_lock);
+			if (*coremap->c_entries[c_index].ce_pgentry & PG_BUSY ||
+			*coremap->c_entries[c_index].ce_pgentry &
+			PG_SWAP) {
+				lock_release(coremap->c_entries[c_index].ce_addrspace->as_lock);
 				spinlock_acquire(&coremap->c_spinlock);
-				coremap->c_entries[index].ce_busy = false;
+				coremap->c_entries[c_index].ce_busy = false;
 				spinlock_release(&coremap->c_spinlock);
-				thread_yield();
-				spinlock_acquire(&coremap->c_spinlock);
+	//			thread_yield();
 				continue;
-			}
 
-			*coremap->c_entries[index].ce_pgentry |= PG_BUSY;
-			lock_release(coremap->c_entries[index].ce_addrspace->as_lock);
-			spinlock_acquire(&coremap->c_spinlock);
-			break;
-		}
+			} else if (*coremap->c_entries[c_index].ce_pgentry &
+			PG_VALID) {
+				*coremap->c_entries[c_index].ce_pgentry |=
+				PG_BUSY;
+				evicted_paddr =
+				(paddr_t)((*coremap->c_entries[c_index].ce_pgentry
+				& PG_FRAME) << 12);
+				KASSERT(evicted_paddr == (paddr_t)(c_index*PAGE_SIZE));
+				kswap->sw_ts->ts_paddr = evicted_paddr;
+				vm_tlbshootdown(kswap->sw_ts);
+				lock_release(coremap->c_entries[c_index].ce_addrspace->as_lock);
+				*paddr = evicted_paddr;
+				break;
+
+			} else {
+				panic("sw_getpage should not get here\n");
+			}
+		}			
 	}
+
+
 }
 
 int
 sw_evictpage(paddr_t paddr) {
-	KASSERT(paddr != 0);
 
-	struct lock *ce_aslock;
-	struct cv *ce_ascv;
-	struct uio ku;
 	struct iovec iov;
-	int index;
+	struct uio ku;
+	int c_index;
 	int result;
 	unsigned sw_offset;
 
-	KASSERT(spinlock_do_i_hold(&coremap->c_spinlock));
-
-	index = (int)(paddr/PAGE_SIZE);
-
-	KASSERT(coremap->c_entries[index].ce_busy);
-	KASSERT(coremap->c_entries[index].ce_foruser);
-	KASSERT(!(*coremap->c_entries[index].ce_pgentry & PG_SWAP));
-	KASSERT(*coremap->c_entries[index].ce_pgentry & PG_BUSY);
-	KASSERT(*coremap->c_entries[index].ce_pgentry & PG_VALID);
-	KASSERT((paddr_t)((*coremap->c_entries[index].ce_pgentry & PG_FRAME) <<
-	12) == paddr);
-
-	spinlock_release(&coremap->c_spinlock);
-	ce_aslock = coremap->c_entries[index].ce_addrspace->as_lock;
-	ce_ascv = coremap->c_entries[index].ce_addrspace->as_cv;
-
-	if (*coremap->c_entries[index].ce_pgentry & PG_DIRTY) {
+	c_index = (int)(paddr/PAGE_SIZE);
 	
+	if (*coremap->c_entries[c_index].ce_pgentry & PG_DIRTY) {
 		lock_acquire(kswap->sw_disklock);
-
 		result = bitmap_alloc(kswap->sw_diskoffset, &sw_offset);
+		lock_release(kswap->sw_disklock);
 		if (result) {
-			lock_release(kswap->sw_disklock);
-			spinlock_acquire(&coremap->c_spinlock);
+			lock_acquire(coremap->c_entries[c_index].ce_addrspace->as_lock);
+			*coremap->c_entries[c_index].ce_pgentry &= ~PG_BUSY;
+			cv_signal(coremap->c_entries[c_index].ce_addrspace->as_cv,
+			coremap->c_entries[c_index].ce_addrspace->as_lock);
+			lock_release(coremap->c_entries[c_index].ce_addrspace->as_lock);
 			return ENOMEM;
 		}
 
-		lock_release(kswap->sw_disklock);
-
-	}
-
-	kswap->sw_ts->ts_paddr = paddr;
-	vm_tlbshootdown(kswap->sw_ts);
-
-	if (*coremap->c_entries[index].ce_pgentry & PG_DIRTY) {
 		uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE,
 		(off_t)(sw_offset*PAGE_SIZE), UIO_WRITE);
 		result = VOP_WRITE(kswap->sw_file, &ku);
 		if (result) {
-			lock_acquire(ce_aslock);
-			*coremap->c_entries[index].ce_pgentry &= ~PG_BUSY;
-			cv_signal(ce_ascv, ce_aslock);
-			lock_release(ce_aslock);
-			spinlock_acquire(&coremap->c_spinlock);
+			lock_acquire(coremap->c_entries[c_index].ce_addrspace->as_lock);
+			*coremap->c_entries[c_index].ce_pgentry &= ~PG_BUSY;
+			cv_signal(coremap->c_entries[c_index].ce_addrspace->as_cv,
+			coremap->c_entries[c_index].ce_addrspace->as_lock);
+			lock_release(coremap->c_entries[c_index].ce_addrspace->as_lock);
 			return result;
-		}	
-	
-		lock_acquire(ce_aslock);	
-		*coremap->c_entries[index].ce_pgentry = PG_SWAP | (int)sw_offset;
+
+		}
+
+		lock_acquire(coremap->c_entries[c_index].ce_addrspace->as_lock);
+		*coremap->c_entries[c_index].ce_pgentry = PG_SWAP |
+		(int)(sw_offset);
+		cv_signal(coremap->c_entries[c_index].ce_addrspace->as_cv,
+		coremap->c_entries[c_index].ce_addrspace->as_lock);
+		lock_release(coremap->c_entries[c_index].ce_addrspace->as_lock);
 
 	} else {
-		*coremap->c_entries[index].ce_pgentry = PG_SWAP |
-		coremap->c_entries[index].ce_swapoffset;
 
-	}
+		panic("All pages are assumed dirty for now...\n");
 
-	cv_signal(ce_ascv, ce_aslock);
-	lock_release(ce_aslock);
-	spinlock_acquire(&coremap->c_spinlock);
+	} 
+
 	return 0;
 }
 
@@ -371,12 +287,10 @@ bool
 sw_check(int *pg_entry, struct addrspace *as) {
 	unsigned long as_npages1;
 	unsigned long as_npages2;
-	int as_stacksz;
 	int as_heapsz;
 
 	as_npages1 = as->as_npages1;
 	as_npages2 = as->as_npages2;
-	as_stacksz = as->as_stacksz;
 	as_heapsz = as->as_heapsz;
 
 	for (unsigned long i=0; i<as_npages1; i++) {
@@ -397,7 +311,7 @@ sw_check(int *pg_entry, struct addrspace *as) {
 		}
 	}
 
-	for (int i=0; i<as_stacksz; i++) {
+	for (int i=0; i<STACKSIZE; i++) {
 		if (&as->as_stackpgtable[i] == pg_entry) {
 			return true;
 		}
