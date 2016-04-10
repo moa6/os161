@@ -34,6 +34,7 @@
 #include <lib.h>
 
 struct coremap_entry {
+
 	struct addrspace *ce_addrspace;
 	bool ce_allocated;
 	bool ce_foruser;
