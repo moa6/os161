@@ -111,6 +111,7 @@ coremap_getkpages(unsigned long npages) {
 	paddr_t pgvictim;
 	int c_index;
 	int result;
+	int incr;
 	unsigned long total_npages;
 	unsigned long start;
 	unsigned long end;
@@ -170,7 +171,6 @@ coremap_getkpages(unsigned long npages) {
 	}
 
 	spinlock_release(&coremap->c_spinlock);
-//	thread_yield();
 
 	if (npages == 1) {
 
@@ -213,128 +213,166 @@ coremap_getkpages(unsigned long npages) {
 	
 	} else {
 
-		panic("No support for contiguous kernel pages yet...\n");
-/*
+		spinlock_acquire(&coremap->c_spinlock);
 		start = 0;
+		incr = 0;
 		total_npages = coremap->c_npages;
 		
 		while (start < total_npages) {
 
-			if (!coremap->c_entries[end].ce_allocated) {
-				KASSERT(coremap->c_entries[end].ce_addrspace
-				== NULL);
-				KASSERT(!coremap->c_entries[end].ce_busy);
-				KASSERT(coremap->c_entries[end].ce_next
-				== 0);
-				KASSERT(coremap->c_entries[end].ce_pgentry == NULL);
-				KASSERT(coremap->c_entries[end].ce_swapoffset == -1);
-			}
-
-			if (!coremap->c_entries[start].ce_allocated ||
-			(!coremap->c_entries[start].ce_busy &&
-			coremap->c_entries[start].ce_foruser)) {
-				end = start+npages-1;
-				if (end >= total_npages) {
-					break;
-				}
-
-				while (end > start) {
-
-					if (coremap->c_entries[end].ce_foruser) {
-						KASSERT(coremap->c_entries[end].ce_pgentry
-						!= NULL);
-					}
-
-					if ((coremap->c_entries[end].ce_allocated &&
-					!coremap->c_entries[end].ce_foruser) ||
-					(coremap->c_entries[end].ce_foruser &&
-					coremap->c_entries[end].ce_busy)) {
-						break;
-					} else {
-						end--;
-					}
-				}
+			while ((unsigned)incr < npages) {
 			
-				if (start == end) {
-					for (unsigned i=start; i<start+npages; i++) {
-						
-						if (coremap->c_entries[i].ce_allocated) {
-							KASSERT(coremap->c_entries[i].ce_foruser);
+				if (!coremap->c_entries[start+incr].ce_allocated) {
+					coremap->c_entries[start+incr].ce_busy =
+					true;
 
-							coremap->c_entries[i].ce_busy
-							= true;
-							pgvictim =
-							(paddr_t)(i*PAGE_SIZE);
-
-							KASSERT((*coremap->c_entries[i].ce_pgentry
-							& PG_FRAME) << 12 ==
-							(int)pgvictim);
-
-							result =
-							sw_evictpage(pgvictim);
-							if (result) {
-								coremap->c_entries[i].ce_busy
-								= false;
-								spinlock_release(&coremap->c_spinlock);
-								return 0;
-							}
-
-							coremap->c_entries[i].ce_addrspace
-							= NULL;
-							coremap->c_entries[i].ce_allocated
-							= false;
-							coremap->c_entries[i].ce_foruser
-							= false;
-							coremap->c_entries[i].ce_next
-							= 0;
-							coremap->c_entries[i].ce_pgentry
-							= NULL;
-							coremap->c_entries[i].ce_swapoffset
-							= -1;
-							coremap->c_entries[i].ce_busy
-							= false;
-						} 
-						
-					}
-					
-					for (unsigned i=start; i<start+npages; i++) { 
-
-						coremap->c_entries[i].ce_addrspace
-						= NULL;
-						coremap->c_entries[i].ce_allocated
-						= true;
-						coremap->c_entries[i].ce_foruser
-						= false;
-						coremap->c_entries[i].ce_busy
-						= false;
-						coremap->c_entries[i].ce_pgentry
-						= NULL;
-						coremap->c_entries[i].ce_swapoffset
-						= -1;
-						
-
-						if (i < start+npages-1) {
-							coremap->c_entries[i].ce_next = 1;
-						} else {
-							coremap->c_entries[i].ce_next = 0;
-						}
-						
-					}
-
-					paddr = (paddr_t)(start*PAGE_SIZE);
+				} else if (coremap->c_entries[start+incr].ce_foruser &&
+				!coremap->c_entries[start+incr].ce_busy) {
+					coremap->c_entries[start+incr].ce_busy =
+					true;
 					spinlock_release(&coremap->c_spinlock);
-					return paddr;
-				} 
-						
+					lock_acquire(coremap->c_entries[start+incr].ce_addrspace->as_lock);
+					
+					if(*coremap->c_entries[start+incr].ce_pgentry
+					& PG_BUSY ||
+					*coremap->c_entries[start+incr].ce_pgentry
+					& PG_SWAP) {
+						lock_release(coremap->c_entries[start+incr].ce_addrspace->as_lock);
+						spinlock_acquire(&coremap->c_spinlock);
+						break;
+
+					} else {
+						*coremap->c_entries[start+incr].ce_pgentry
+						|= PG_BUSY;
+						lock_release(coremap->c_entries[start+incr].ce_addrspace->as_lock);
+						spinlock_acquire(&coremap->c_spinlock);
+
+					}
+		
+				} else {
+					break;
+
+				}
+
+				incr++;
 			}
+
+			if ((unsigned)incr < npages) {
+				
+				while (incr > 0) {
+
+					KASSERT(coremap->c_entries[start+incr-1].ce_busy
+					== true);
+					coremap->c_entries[start+incr-1].ce_busy =
+					false;
+
+					if (coremap->c_entries[start+incr-1].ce_foruser) {
+				
+						spinlock_release(&coremap->c_spinlock);
+						
+						lock_acquire(coremap->c_entries[start+incr-1].ce_addrspace->as_lock);
+
+						KASSERT(*coremap->c_entries[start+incr-1].ce_pgentry
+						& PG_BUSY);
+
+						*coremap->c_entries[start+incr-1].ce_pgentry
+						&= ~PG_BUSY;
+
+						cv_wait(coremap->c_entries[start+incr-1].ce_addrspace->as_cv,
+						coremap->c_entries[start+incr-1].ce_addrspace->as_lock);
+					
+						lock_release(coremap->c_entries[start+incr-1].ce_addrspace->as_lock);
+
+						spinlock_acquire(&coremap->c_spinlock);
+							
+					} 
+
+					incr--;
+
+				}		
+	
+			} else {
+
+				KASSERT((unsigned)incr == npages);
+
+				for (unsigned i=start; i<start+npages; i++) {
+					
+					if (coremap->c_entries[i].ce_foruser) {
+
+						pgvictim =
+						(paddr_t)(i*PAGE_SIZE);
+
+						KASSERT((paddr_t)((*coremap->c_entries[i].ce_pgentry
+						& PG_FRAME) << 12) == pgvictim);
+						
+						result = sw_evictpage(pgvictim);
+						spinlock_release(&coremap->c_spinlock);
+						lock_acquire(coremap->c_entries[i].ce_addrspace->as_lock);
+						*coremap->c_entries[i].ce_pgentry
+						&= ~PG_BUSY;
+						lock_release(coremap->c_entries[i].ce_addrspace->as_lock);
+
+						if (result) {
+							goto error;
+		
+						}
+
+						spinlock_acquire(&coremap->c_spinlock);
+									
+					} 
+
+				}
+
+				for (unsigned i=start; i<start+npages; i++) {
+					
+					coremap->c_entries[i].ce_addrspace =
+					NULL;
+					coremap->c_entries[i].ce_allocated =
+					true;
+					coremap->c_entries[i].ce_foruser =
+					false;
+					coremap->c_entries[i].ce_busy = false;
+					coremap->c_entries[i].ce_pgentry =
+					NULL;
+					coremap->c_entries[i].ce_swapoffset =
+					-1;
+
+					if (i < start+npages-1) {
+						coremap->c_entries[i].ce_next =
+						1;
+					} else {
+						coremap->c_entries[i].ce_next =
+						0;
+					}
+
+
+				}
+
+				spinlock_release(&coremap->c_spinlock);
+				paddr = (paddr_t)(start*PAGE_SIZE);
+				return paddr;
+
+			}				
 
 			start++;
 		}
-
-*/
 	}
  
-	panic("coremap_getkpages should not get to here\n");
+error:
+
+	spinlock_acquire(&coremap->c_spinlock);
+
+	for (unsigned i=start; i<start+npages; i++) {
+
+		KASSERT(coremap->c_entries[i].ce_busy);
+		coremap->c_entries[i].ce_busy = false;
+
+	}
+
+	spinlock_release(&coremap->c_spinlock);
+	return 0;
+
+
 }
 
 int
