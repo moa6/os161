@@ -189,7 +189,6 @@ sw_evictpage(paddr_t paddr) {
 			coremap->c_entries[c_index].ce_addrspace->as_lock);
 			lock_release(coremap->c_entries[c_index].ce_addrspace->as_lock);
 			return result;
-
 		}
 
 		lock_acquire(coremap->c_entries[c_index].ce_addrspace->as_lock);
