@@ -109,7 +109,7 @@ coremap_getkpages(unsigned long npages) {
 
 	paddr_t paddr;
 	paddr_t pgvictim;
-	int index;
+	int c_index;
 	int result;
 	unsigned long total_npages;
 	unsigned long start;
@@ -169,31 +169,52 @@ coremap_getkpages(unsigned long npages) {
 		start++;
 	}
 
+	spinlock_release(&coremap->c_spinlock);
+//	thread_yield();
+
 	if (npages == 1) {
 
-		sw_getpage(&paddr);
-		index = (int)(paddr/PAGE_SIZE);
-		coremap->c_entries[index].ce_busy = true;
+		sw_getpage(&pgvictim);
 
-		result = sw_evictpage(paddr);
+		KASSERT(!spinlock_do_i_hold(&coremap->c_spinlock));
+		c_index = (int)(pgvictim/PAGE_SIZE);
+		KASSERT(coremap->c_entries[c_index].ce_allocated);
+		KASSERT(coremap->c_entries[c_index].ce_foruser);
+		KASSERT(coremap->c_entries[c_index].ce_busy);
+		KASSERT((paddr_t)((*coremap->c_entries[c_index].ce_pgentry &
+		PG_FRAME) << 12) == pgvictim);
+		KASSERT(*coremap->c_entries[c_index].ce_pgentry & PG_VALID);
+		KASSERT(!(*coremap->c_entries[c_index].ce_pgentry & PG_SWAP));
+		KASSERT(*coremap->c_entries[c_index].ce_pgentry & PG_BUSY);
+		
+		result = sw_evictpage(pgvictim);
 		if (result) {
-			coremap->c_entries[index].ce_busy = false;
-			spinlock(&coremap->
+			spinlock_acquire(&coremap->c_spinlock);
+			coremap->c_entries[c_index].ce_busy = false;
+			spinlock_release(&coremap->c_spinlock);
 			return result;
 		}
-		
-		coremap->c_entries[index].ce_addrspace = NULL;
-		coremap->c_entries[index].ce_allocated = true;
-		coremap->c_entries[index].ce_foruser = false;
-		coremap->c_entries[index].ce_next = 0;
-		coremap->c_entries[index].ce_pgentry = NULL;
-		coremap->c_entries[index].ce_swapoffset = -1;			
-		coremap->c_entries[index].ce_busy = false;
+
+		KASSERT(coremap->c_entries[c_index].ce_busy);
+
+		spinlock_acquire(&coremap->c_spinlock);	
+
+		coremap->c_entries[c_index].ce_allocated = true;
+		coremap->c_entries[c_index].ce_pgentry = NULL;
+		coremap->c_entries[c_index].ce_addrspace = NULL;
+		coremap->c_entries[c_index].ce_foruser = false;
+		coremap->c_entries[c_index].ce_next = 0;
+		coremap->c_entries[c_index].ce_swapoffset = -1;
+		coremap->c_entries[c_index].ce_busy = false;
 
 		spinlock_release(&coremap->c_spinlock);
-		return paddr;
+
+		return pgvictim;
 	
 	} else {
+
+		panic("No support for contiguous kernel pages yet...\n");
+/*
 		start = 0;
 		total_npages = coremap->c_npages;
 		
@@ -310,11 +331,10 @@ coremap_getkpages(unsigned long npages) {
 			start++;
 		}
 
-
+*/
 	}
  
-	spinlock_release(&coremap->c_spinlock);
-	return 0;
+	panic("coremap_getkpages should not get to here\n");
 }
 
 int
@@ -324,7 +344,7 @@ coremap_getpage(int *pg_entry, struct addrspace *as) {
 
 	paddr_t paddr;
 	paddr_t pgvictim;
-	int index;
+	int c_index;
 	int result;
 	unsigned long total_npages;
 	unsigned long start;
@@ -349,7 +369,7 @@ coremap_getpage(int *pg_entry, struct addrspace *as) {
 			paddr = (paddr_t)((i*PAGE_SIZE) >> 12);
 
 			*pg_entry &= ~PG_FRAME;
-			*pg_entry |= paddr; 
+			*pg_entry |= paddr;
 			coremap->c_entries[i].ce_pgentry = pg_entry;
 			spinlock_release(&coremap->c_spinlock);
 			return 0;
@@ -358,28 +378,40 @@ coremap_getpage(int *pg_entry, struct addrspace *as) {
 			
 	}
 
+	spinlock_release(&coremap->c_spinlock);
+//	thread_yield();
 	sw_getpage(&pgvictim);
-	index = (int)(pgvictim/PAGE_SIZE);
-	KASSERT(coremap->c_entries[index].ce_busy);
+
+	KASSERT(!spinlock_do_i_hold(&coremap->c_spinlock));
+	c_index = (int)(pgvictim/PAGE_SIZE);
+	KASSERT(coremap->c_entries[c_index].ce_allocated);
+	KASSERT(coremap->c_entries[c_index].ce_foruser);
+	KASSERT(coremap->c_entries[c_index].ce_busy);
+	KASSERT((paddr_t)((*coremap->c_entries[c_index].ce_pgentry & PG_FRAME)
+	<< 12) == pgvictim);
 	
 	result = sw_evictpage(pgvictim);
 	if (result) {
-		coremap->c_entries[index].ce_busy = false;
+		spinlock_acquire(&coremap->c_spinlock);
+		coremap->c_entries[c_index].ce_busy = false;
 		spinlock_release(&coremap->c_spinlock);
 		return result;
 	}
 
-	paddr = pgvictim >> 12;
+	KASSERT(coremap->c_entries[c_index].ce_busy);
 
+	spinlock_acquire(&coremap->c_spinlock);	
+	paddr = pgvictim >> 12;
 	*pg_entry &= ~PG_FRAME;
 	*pg_entry |= paddr; 
-	coremap->c_entries[index].ce_pgentry = pg_entry;
-	coremap->c_entries[index].ce_addrspace = as;
-	coremap->c_entries[index].ce_foruser = true;
-	coremap->c_entries[index].ce_next = 0;
-	coremap->c_entries[index].ce_pgentry = pg_entry;
-	coremap->c_entries[index].ce_swapoffset = -1;
-	coremap->c_entries[index].ce_busy = false;
+
+	coremap->c_entries[c_index].ce_allocated = true;
+	coremap->c_entries[c_index].ce_addrspace = as;
+	coremap->c_entries[c_index].ce_foruser = true;
+	coremap->c_entries[c_index].ce_next = 0;
+	coremap->c_entries[c_index].ce_pgentry = pg_entry;
+	coremap->c_entries[c_index].ce_swapoffset = -1;
+	coremap->c_entries[c_index].ce_busy = false;
 
 	spinlock_release(&coremap->c_spinlock);
 	return 0;
