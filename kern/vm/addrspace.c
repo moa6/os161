@@ -1061,29 +1061,7 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 		lock_release(old->as_lock);
 
 	}
-/*
-	lock_acquire(old->as_lock);
-	for (int i=0; i<old_npages; i++) {
 
-		if (old_pgtable[i] != 0) {
-			KASSERT(old_pgtable[i] & PG_BUSY);
-			old_pgtable[i] &= ~PG_BUSY;
-		}
-
-	}
-	lock_release(old->as_lock);
-
-	lock_acquire(new->as_lock);
-	for (int i=0; i<old_npages; i++) {
-
-		if (new_pgtable[i] != 0) {
-			KASSERT(new_pgtable[i] & PG_BUSY);
-			new_pgtable[i] &= ~PG_BUSY;
-		}
-
-	}
-	lock_release(new->as_lock);
-*/
 	return 0;
 }
 
