@@ -404,7 +404,65 @@ as_destroyregion(struct addrspace *as, int as_regiontype)
 	}
 
 	for (int i=0; i<npages; i++) {
-		
+
+		if (pgtable[i] == 0) {
+			continue;
+
+		} else {
+
+			lock_acquire(as->as_lock);
+
+			while (pgtable[i] & PG_BUSY) {
+				cv_wait(as->as_cv, as->as_lock);
+			}
+
+			pgtable[i] |= PG_BUSY;
+
+			lock_release(as->as_lock);
+
+			spinlock_acquire(&coremap->c_spinlock);
+
+			if (pgtable[i] & PG_VALID) {
+				
+				c_index = (int)(((pgtable[i] & PG_FRAME) << 12)
+				/ PAGE_SIZE);
+
+				while (coremap->c_entries[c_index].ce_busy) {
+					spinlock_release(&coremap->c_spinlock);
+					thread_yield();
+					spinlock_acquire(&coremap->c_spinlock);
+				}
+
+				KASSERT((paddr_t)((*coremap->c_entries[c_index].ce_pgentry
+				& PG_FRAME) << 12) ==
+				(paddr_t)(c_index*PAGE_SIZE));
+
+				KASSERT(!coremap->c_entries[c_index].ce_busy);
+				coremap->c_entries[c_index].ce_addrspace = NULL;
+				coremap->c_entries[c_index].ce_allocated =
+				false;
+				coremap->c_entries[c_index].ce_foruser = false;
+				coremap->c_entries[c_index].ce_next = 0;
+				coremap->c_entries[c_index].ce_pgentry = NULL;
+				coremap->c_entries[c_index].ce_swapoffset = -1;
+
+			} else if (pgtable[i] & PG_SWAP) {
+				
+				sw_offset = (unsigned)(pgtable[i] & PG_FRAME);
+				lock_acquire(kswap->sw_disklock);
+				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
+				lock_release(kswap->sw_disklock);
+			
+			} else {
+				panic("as_destroy should not get to here\n");
+			}
+
+			spinlock_release(&coremap->c_spinlock);
+
+		}
+
+	}
+/*		
 		spinlock_acquire(&coremap->c_spinlock);
 		if (pgtable[i] & PG_VALID) {
 			c_index = ((pgtable[i] & PG_FRAME) << 12) / PAGE_SIZE;
@@ -422,16 +480,6 @@ as_destroyregion(struct addrspace *as, int as_regiontype)
 			spinlock_release(&coremap->c_spinlock);
 
 		} else if (pgtable[i] & PG_SWAP) {
-/*
-			KASSERT(!coremap->c_entries[c_index].ce_busy);
-			coremap->c_entries[c_index].ce_addrspace = NULL;
-			coremap->c_entries[c_index].ce_allocated = false;
-			coremap->c_entries[c_index].ce_foruser = false;
-			coremap->c_entries[c_index].ce_busy = false;
-			coremap->c_entries[c_index].ce_next = 0;
-			coremap->c_entries[c_index].ce_pgentry = NULL;
-			coremap->c_entries[c_index].ce_swapoffset = -1;
-*/
 			spinlock_release(&coremap->c_spinlock);
 			sw_offset = (unsigned)(pgtable[i] & PG_FRAME);
 			lock_acquire(kswap->sw_disklock);
@@ -446,6 +494,7 @@ as_destroyregion(struct addrspace *as, int as_regiontype)
 	}
 
 	kfree(pgtable);
+*/
 }
 
 void
@@ -1004,7 +1053,6 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 		
 		} else {
 			KASSERT(old_pgtable[i] == PG_BUSY);
-			new_pgtable[i] = 0;
 		}
 
 
