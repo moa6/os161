@@ -38,9 +38,13 @@
 #include <vm.h>
 #include "opt-dumbvm.h"
 
-#define MAX_STACKPAGES 500
-#define MIN_STACKSZ 4
+#define MAX_HEAPSIZE 1378
+#define STACKSIZE 20
 #define MIN_HEAPSZ 4
+#define AS_REGION1 0
+#define AS_REGION2 1
+#define AS_HEAP 2
+#define AS_STACK 3
 #define PG_VALID 0x80000000
 #define PG_FRAME 0x000FFFFF
 #define PG_SWAP 0x40000000
@@ -78,7 +82,6 @@ struct addrspace {
 	unsigned long as_npages2;
 	int* as_stackpgtable;
 	vaddr_t as_stackptr;
-	int as_stacksz;
 	int* as_heappgtable;
 	vaddr_t as_heaptop;
 	int as_heapsz;
@@ -127,9 +130,13 @@ struct addrspace {
  */
 
 struct addrspace *as_create(void);
+int		  as_growheap(struct addrspace *as);
+int		  as_shrinkheap(struct addrspace *as);
+int		  as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype);
 int               as_copy(struct addrspace *src, struct addrspace **ret);
 void              as_activate(void);
 void              as_deactivate(void);
+void		  as_destroyregion(struct addrspace *as, int as_regiontype);
 void              as_destroy(struct addrspace *);
 
 int               as_define_region(struct addrspace *as,
