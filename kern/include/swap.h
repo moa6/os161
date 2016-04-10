@@ -47,7 +47,6 @@ struct swap {
 	bool sw_pgavail;
 	struct lock *sw_pglock;
 	struct lock *sw_disklock;
-	struct lock *sw_diskio_lock;
 	struct cv *sw_cv;
 	struct vnode *sw_file;
 	struct bitmap *sw_diskoffset;
@@ -56,11 +55,7 @@ struct swap {
 
 extern struct swap *kswap;
 
-void sw_lruclk_create(void);
-
 void sw_bootstrap(void);
-
-void sw_mv_clkhand(void *p, unsigned long arg);
 
 void sw_getpage(paddr_t *paddr);
 
