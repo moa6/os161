@@ -39,6 +39,7 @@
 #include <synch.h>
 #include <current.h>
 #include <coremap.h>
+#include <cpu.h>
 #include <addrspace.h>
 #include <thread.h>
 #include <bitmap.h>
@@ -701,9 +702,15 @@ void sys__exit(int exitcode) {
         thread_exit();	
 }
 
+/*
+ * sys_sbrk
+ *
+ * sets process break (allocate memory)
+ */
 int
 sys_sbrk(intptr_t amount, void *retval)  {
 	int npages;
+	int c_index;
 	int result;
 	vaddr_t hbase;
 	vaddr_t old_htop;
@@ -711,42 +718,77 @@ sys_sbrk(intptr_t amount, void *retval)  {
 	vaddr_t htop_limit;
 	vaddr_t h_ptr;
 	paddr_t paddr;
-	struct tlbshootdown *ts;
+//	struct tlbshootdown *ts;
 	struct addrspace *as;
 	unsigned sw_offset;
 
+	/* Get the current address space */
 	as = proc_getas();
 
+	/* Save the current end address of the heap region in old_htop */
 	old_htop = as->as_heaptop;
+
+	/* Calculate the base address of the heap and the new end address of the
+	 * heap */
 	hbase = as->as_vbase2 + as->as_npages2 * PAGE_SIZE;
 	new_htop = as->as_heaptop + amount;
-	htop_limit = hbase + MAX_HEAPSIZE * PAGE_SIZE;
+
+	/* In our implementation, our heap is limited in size.  Calculate the
+	 * maximum address of the heap */
+	htop_limit = hbase + MAX_HEAPPAGES * PAGE_SIZE;
+
+	/* Calculate how many pages the heap takes up now that the heap size has
+	 * changed */
 	npages = (int)(((new_htop & PAGE_FRAME) - hbase)/PAGE_SIZE);
 	if (new_htop & ~PAGE_FRAME) {
 		npages++;
 	}
 	
 	if (new_htop < hbase) {
+		
+		/* If the request moves the heap below its initial value, return
+		 * EINVAL */
+
 		*(vaddr_t *)retval = -1;
 		return EINVAL;
 
 	} else if (new_htop <= as->as_stackptr && new_htop < htop_limit) {
 
 		if (amount == 0) {
+
+			/* If the amount requested equals 0, do nothing and
+			 * return the end address of the heap */
+
 			*(vaddr_t *)retval = old_htop;
 			return 0;
 
 		} else if (amount > 0) {
 
+			/* If amount is greater than 0, the heap size needs to
+			 * increase */
+
 			if (as->as_heappgtable == NULL) {
+
+				/* Create a heap page table if it has not been
+				 * created already */
+
 				as->as_heappgtable =
 				kmalloc(MIN_HEAPSZ*sizeof(int));
 				if (as->as_heappgtable == NULL) {
 					*(vaddr_t *)retval = -1;
 					return ENOMEM;
 				}
+
+				/* Initialize the heap page table entries with values of
+				 * 0 */ 
+				for (int i=0; i<MIN_HEAPSZ; i++) {
+					as->as_heappgtable[i] = 0;
+				}
 			}
 
+			/* If the total number of heap pages exceeds the current
+			 * size of the heap page table, increase the heap page
+			 * table size until the heap fits */
 			while (npages > as->as_heapsz) {
 				result = as_growheap(as);
 				if (result) {
@@ -757,32 +799,78 @@ sys_sbrk(intptr_t amount, void *retval)  {
 
 		} else {
 
+			/* If amount is less than 0, the heap size needs to be decreased */
+
 			h_ptr = new_htop;
 			
 			while (h_ptr < old_htop) {
+
+
+				/* Starting from the new end address of the heap
+				 * page table, free the page table entries until
+				 * we reach the old end address of the heap page
+				 * table */
+
+				/* Mark the page table entry as being busy */
 				lock_acquire(as->as_lock);
 				int index = (int)((h_ptr - hbase)/PAGE_SIZE);
 				as->as_heappgtable[index] |= PG_BUSY;
 				lock_release(as->as_lock);
 
 				if (as->as_heappgtable[index] & PG_VALID) {
-					ts = kmalloc(sizeof (const struct
-					tlbshootdown));
-					if (ts == NULL) {
-						as->as_heappgtable[index] &=
-						~PG_BUSY;
-						*(vaddr_t *)retval = -1;
-						return ENOMEM;
-					}
+
+					/* If the page table entry is marked as
+					 * valid, then the page contents are in
+					 * memory.  We need to invalidate the
+					 * physical address in the TLB */
 
 					paddr = (as->as_heappgtable[index] & PG_FRAME)
 					<< 12;
-					ts->ts_paddr = paddr;
-					vm_tlbshootdown(ts);
-					kfree(ts);
-					coremap_freepage(paddr);
+					c_index = (int)(paddr/PAGE_SIZE);
+			
+					execute_tlbshootdown(paddr);
+
+					/* Although we marked the page table
+					 * entry as being busy, the page daemon
+					 * or some other process could still
+					 * attempt to evict the page.  Because
+					 * the page table entry is marked as
+					 * busy, they cannot evict the page but
+					 * they could still temporarily mark the
+					 * coremap entry as being busy.  So we
+					 * wait until the coremap entry is not
+					 * marked as busy */
+
+					spinlock_acquire(&coremap->c_spinlock);
+					while (coremap->c_entries[c_index].ce_busy) {
+						spinlock_release(&coremap->c_spinlock);
+						thread_yield();
+						spinlock_acquire(&coremap->c_spinlock);
+					}
+
+					KASSERT(coremap->c_entries[c_index].ce_pgentry
+					== &as->as_heappgtable[index]);
+
+					/* Mark the coremap entry as being free
+					 */ 
+
+					coremap->c_entries[c_index].ce_addrspace
+					= NULL;
+					coremap->c_entries[c_index].ce_allocated
+					= false;
+					coremap->c_entries[c_index].ce_pgentry =
+					NULL;
+					coremap->c_entries[c_index].ce_swapoffset
+					= -1;
+
+					spinlock_release(&coremap->c_spinlock);
 
 				} else if (as->as_heappgtable[index] & PG_SWAP) {
+
+					/* If the page contents are on disk,
+					 * then simply mark the offset location
+					 * in the swap file as being free */
+
 					sw_offset =
 					(unsigned)(as->as_heappgtable[index] &
 					PG_FRAME);
@@ -796,11 +884,16 @@ sys_sbrk(intptr_t amount, void *retval)  {
 					PG_BUSY);
 				}
 
+				/* Set the page table entry as being 0 */
 				as->as_heappgtable[index] = 0;
 			
 				h_ptr += PAGE_SIZE;	
 			}
 			
+
+			/* Adjust the size of the heap page table now that heap
+			 * pages have been freed */
+
 			while (npages <  as->as_heapsz/2) {
 
 				if (as->as_heapsz == MIN_HEAPSZ) {
@@ -816,11 +909,16 @@ sys_sbrk(intptr_t amount, void *retval)  {
 
 		}
 	
+		/* Set retval to equal the old end address of the heap */
 		*(vaddr_t *)retval = old_htop;
+		
+		/* Update the end address of the heap */
 		as->as_heaptop = new_htop;
+
 		return 0;
 
 	} else {
+		/* If the heap size exceeds its maximum limit, return ENOMEM */
 		*(vaddr_t *)retval = -1;
 		return ENOMEM;
 	}	
