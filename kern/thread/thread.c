@@ -48,6 +48,7 @@
 #include <current.h>
 #include <synch.h>
 #include <addrspace.h>
+#include <swap.h>
 #include <mainbus.h>
 #include <vnode.h>
 
@@ -1230,4 +1231,26 @@ interprocessor_interrupt(void)
 
 	curcpu->c_ipi_pending = 0;
 	spinlock_release(&curcpu->c_ipi_lock);
+}
+
+void
+execute_tlbshootdown(paddr_t paddr) {
+	unsigned i;
+	struct cpu *c;
+
+	lock_acquire(kswap->sw_tlbshootdown_lock);
+
+	kswap->sw_ts->ts_paddr = paddr;
+
+	for (i=0; i<cpuarray_num(&allcpus); i++) {
+		
+		c = cpuarray_get(&allcpus, i);
+		ipi_tlbshootdown(c, kswap->sw_ts);
+		P(kswap->sw_tlbshootdown_sem);
+
+	}
+
+	lock_release(kswap->sw_tlbshootdown_lock);
+	
+
 }
