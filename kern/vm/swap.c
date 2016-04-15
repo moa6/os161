@@ -30,8 +30,9 @@
 #include <types.h>
 #include <current.h>
 #include <lib.h>
+#include <cpu.h>
+#include <clock.h>
 #include <spinlock.h>
-#include <thread.h>
 #include <synch.h>
 #include <bitmap.h>
 #include <vfs.h>
@@ -40,6 +41,7 @@
 #include <vnode.h>
 #include <coremap.h>
 #include <addrspace.h>
+#include <thread.h>
 #include <kern/fcntl.h>
 #include <kern/errno.h>
 #include <lamebus/lhd.h>
@@ -47,103 +49,157 @@
 
 struct swap *kswap;
 
+/*
+ * sw_bootstrap
+ *
+ * Initializes the kernel swap structure in boot up
+ */
 void
 sw_bootstrap(void) {
 
 	int result;
 
+	/* Allocate space for the kernel swap structure */
 	kswap = kmalloc(sizeof(struct swap));
 	if (kswap == NULL) {
 		panic("kmalloc in sw_bootstrap failed\n");
 	}
 
-	kswap->sw_diskoffset = bitmap_create((unsigned)SWAP_SIZE);
+	/* Create the bitmap for tracking the offset locations available in the
+	 * swap file */
+	kswap->sw_diskoffset = bitmap_create((unsigned)SWAPFILE_SIZE);
 	if (kswap->sw_diskoffset == NULL) {
 		panic("bitmap_create in sw_bootstrap failed\n");
 	}
 
+	/* Create a swap file */
 	char swap_file_name[]="lhd0raw:";
-	result = vfs_open(swap_file_name, O_RDWR, 0, &kswap->sw_file);
+	result = vfs_open(swap_file_name, O_RDWR, 0, &kswap->sw_vn);
 	if (result) {
 		panic("vfs_open in sw_bootstrap failed\n");
 	}
 
-//	swap_test();
-
+	/* Create the tlbshootdown structure */
 	kswap->sw_ts = kmalloc(sizeof(const struct tlbshootdown));
 	if (kswap->sw_ts == NULL) {
 		panic("kmalloc in sw_bootstrap failed\n");
 	}
 
-	kswap->sw_pglock = lock_create("swap lock");
-	if (kswap->sw_pglock == NULL) {
-		panic("lock_create in sw_bootstrap failed\n");
-	}
-
+	/* Create the lock which ensures updates to the offset locations in the
+	 * swap file are made atomically */
 	kswap->sw_disklock = lock_create("swap disk lock");
 	if (kswap->sw_disklock == NULL) {
 		panic("lock_create in sw_bootstrap failed\n");
 	}
 
-	kswap->sw_cv = cv_create("swap cv");
-	if (kswap->sw_cv == NULL) {
-		panic("cv_create in sw_bootstrap failed\n");
+	/* Create the lock which protects sw_ts */
+	kswap->sw_tlbshootdown_lock = lock_create("swap tlbshootdown lock");
+	if (kswap->sw_tlbshootdown_lock == NULL) {
+		panic("lock_create in sw_bootstrap failed\n");
 	}
 
-	kswap->sw_pgavail = false;
-	kswap->sw_pgvictim = 0;
-/*
-	result = thread_fork("LRU clock thread", NULL, sw_mv_clkhand, NULL, 0);
-	if (result) {
-		panic("thread_fork in sw_bootstrap failed\n");
+	/* Create the semaphore which is used to communicate when tlbshootdowns
+	 * are complete */
+	kswap->sw_tlbshootdown_sem = sem_create("sw tlbshootdown sem", 0);
+	if (kswap->sw_tlbshootdown_sem == NULL) {
+		panic("sem_create in sw_bootstrap failed\n");
 	}
-*/
+
+	kswap->sw_pgevicted = false;
+
+	/* Create the page daemon... except that the page daemon is not working
+	 * right now so we comment it out.  :) */
+//	thread_fork("Page eviction thread", NULL, evicting, NULL, 0);
+
 }
 
+/*
+ * sw_getpage
+ *
+ * Picks a page for eviction
+ */
 void
 sw_getpage(paddr_t *paddr) {
 	int c_index;
 	paddr_t evicted_paddr;
 
 	while(1) {
+		/* Acquire the coremap spinlock */
 		spinlock_acquire(&coremap->c_spinlock);
 	
-		c_index = (int)(random() % coremap->c_npages);
+		/* For simplicity sake, we randomly select a page which isn't
+		 * reserved for the kernel to be evicted */
+		c_index = coremap->c_userpbase + (int)(random() % (coremap->c_npages -
+		coremap->c_userpbase));
 
+		/* If the coremap entry indicates that the physical page is
+		 * free, or that it is already being evicted, or that it is
+		 * resreved for the kernel, then the page we selected cannot be
+		 * evicted.  We must try again later. */
 		if (!coremap->c_entries[c_index].ce_allocated ||
 		coremap->c_entries[c_index].ce_busy ||
 		!coremap->c_entries[c_index].ce_foruser) {
 			spinlock_release(&coremap->c_spinlock);
-//			thread_yield();
+			thread_yield();
 			continue;
 
 		} else {
+
+			/* Mark the coremap entry as being busy */
 			coremap->c_entries[c_index].ce_busy = true;
+			
+			/* Release the coremap spinlock */
 			spinlock_release(&coremap->c_spinlock);
+
+			/* Acquire the lock in the address space which contains
+			 * the page table entry pointing to the physical page */
 			lock_acquire(coremap->c_entries[c_index].ce_addrspace->as_lock);
 
 			if (*coremap->c_entries[c_index].ce_pgentry & PG_BUSY ||
 			*coremap->c_entries[c_index].ce_pgentry &
 			PG_SWAP) {
+
+				/* If the page table entry is marked as busy or
+				 * as swapped, we cannot evict the page.  We
+				 * release the address lock and mark the coremap
+				 * entry as not being busy. */
+
 				lock_release(coremap->c_entries[c_index].ce_addrspace->as_lock);
 				spinlock_acquire(&coremap->c_spinlock);
 				coremap->c_entries[c_index].ce_busy = false;
 				spinlock_release(&coremap->c_spinlock);
-	//			thread_yield();
+				thread_yield();
 				continue;
 
 			} else if (*coremap->c_entries[c_index].ce_pgentry &
 			PG_VALID) {
+
+				/* The page table entry pointing to the page is
+				 * marked as valid.  So we can evict this page.
+				 * We mark the page table entry as being busy so
+				 * that when a vm_fault occurs on this physical
+				 * address, the data in the physical page
+				 * will not be modified until the page eviction
+				 * is complete.
+				 */
+
 				*coremap->c_entries[c_index].ce_pgentry |=
 				PG_BUSY;
 				evicted_paddr =
 				(paddr_t)((*coremap->c_entries[c_index].ce_pgentry
 				& PG_FRAME) << 12);
 				KASSERT(evicted_paddr == (paddr_t)(c_index*PAGE_SIZE));
-				kswap->sw_ts->ts_paddr = evicted_paddr;
-				vm_tlbshootdown(kswap->sw_ts);
+	
+				/* Execute the tlbshootdown */
+				execute_tlbshootdown(evicted_paddr);
+
+				/* Release the address space lock */
 				lock_release(coremap->c_entries[c_index].ce_addrspace->as_lock);
+
+				/* Set the value of paddr to the page we wish to
+				 * evict */
 				*paddr = evicted_paddr;
+
 				break;
 
 			} else {
@@ -155,6 +211,11 @@ sw_getpage(paddr_t *paddr) {
 
 }
 
+/*
+ * sw_evictpage
+ *
+ * Performs the actual page eviction
+ */
 int
 sw_evictpage(paddr_t paddr) {
 
@@ -167,10 +228,25 @@ sw_evictpage(paddr_t paddr) {
 	c_index = (int)(paddr/PAGE_SIZE);
 	
 	if (*coremap->c_entries[c_index].ce_pgentry & PG_DIRTY) {
+
+		/* If the page is dirty, we need to write its contents to disk.
+		 * In our current implementation, all pages are assumed to be
+		 * dirty so sw_evictpage should always execute this branch of
+		 * the code. */
+
+		/* Determine if there is space in the swap file to write the
+		 * page contents to disk */
 		lock_acquire(kswap->sw_disklock);
 		result = bitmap_alloc(kswap->sw_diskoffset, &sw_offset);
 		lock_release(kswap->sw_disklock);
 		if (result) {
+
+			/* If the disk is full, we mark the coremap entry as not
+			 * being busy and we wake up any thread waiting to
+			 * access the page.  We also mark the disk as being
+			 * full. */
+
+			kswap->sw_diskfull = true;
 			lock_acquire(coremap->c_entries[c_index].ce_addrspace->as_lock);
 			*coremap->c_entries[c_index].ce_pgentry &= ~PG_BUSY;
 			cv_signal(coremap->c_entries[c_index].ce_addrspace->as_cv,
@@ -179,10 +255,19 @@ sw_evictpage(paddr_t paddr) {
 			return ENOMEM;
 		}
 
+		kswap->sw_diskfull = false;
+
+		/* Write the contents of the page to the swap file */
 		uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE,
 		(off_t)(sw_offset*PAGE_SIZE), UIO_WRITE);
-		result = VOP_WRITE(kswap->sw_file, &ku);
+		result = kswap->sw_vn->vn_ops->vop_write(kswap->sw_vn, &ku);
 		if (result) {
+
+			/* If we were unable to write the contents of the page
+			 * to disk, we mark the coremap entry as not being busy
+			 * and wake up any thread wishing to access the data in
+			 * the page. */
+
 			lock_acquire(coremap->c_entries[c_index].ce_addrspace->as_lock);
 			*coremap->c_entries[c_index].ce_pgentry &= ~PG_BUSY;
 			cv_signal(coremap->c_entries[c_index].ce_addrspace->as_cv,
@@ -191,9 +276,16 @@ sw_evictpage(paddr_t paddr) {
 			return result;
 		}
 
+		/* We have successfully evicted the page.  We set the swap flag
+		 * in the page table entry.  In place of the page frame in the
+		 * page table entry, we place the offset in the swap file where
+		 * the page table contents are stored.*/
 		lock_acquire(coremap->c_entries[c_index].ce_addrspace->as_lock);
 		*coremap->c_entries[c_index].ce_pgentry = PG_SWAP |
 		(int)(sw_offset);
+
+		/* We wake up any threads which have been waiting for the page
+		 * eviction to be completed */
 		cv_signal(coremap->c_entries[c_index].ce_addrspace->as_cv,
 		coremap->c_entries[c_index].ce_addrspace->as_lock);
 		lock_release(coremap->c_entries[c_index].ce_addrspace->as_lock);
@@ -207,6 +299,12 @@ sw_evictpage(paddr_t paddr) {
 	return 0;
 }
 
+/*
+ * sw_pagein
+ *
+ * Performs a page in if the page table entry indicates that the contents of the
+ * page are on disk
+ */
 int
 sw_pagein(int *pg_entry, struct addrspace *as) {
 	paddr_t paddr;
@@ -216,11 +314,12 @@ sw_pagein(int *pg_entry, struct addrspace *as) {
 	struct uio ku;
 	struct iovec iov;
 
-	KASSERT(sw_check(pg_entry, as));
-
+	/* Obtain the location in the swap file where the page contents are
+	 * stored */
 	sw_offset = (off_t)((*pg_entry & PG_FRAME) * PAGE_SIZE);
 	saved_entry = *pg_entry;
 
+	/* Obtain a new page */
 	result = coremap_getpage(pg_entry, as);
 	if (result) {
 		*pg_entry = saved_entry;
@@ -228,94 +327,94 @@ sw_pagein(int *pg_entry, struct addrspace *as) {
 	}
 	
 	paddr = (*pg_entry & PG_FRAME) << 12;
+
+	/* Read the page contents from the swap file into the new page */
 	uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE,
 	sw_offset, UIO_READ);
-
-	result = VOP_READ(kswap->sw_file, &ku);
+	result = kswap->sw_vn->vn_ops->vop_read(kswap->sw_vn, &ku);
 	if (result) {
 		*pg_entry = saved_entry;
 		return result;
 	}
 
+	/* Mark the offset location in the swap file as being free, now that the
+	 * data is in memory */
 	lock_acquire(kswap->sw_disklock);
 	bitmap_unmark(kswap->sw_diskoffset, (unsigned)(sw_offset/PAGE_SIZE));
 	lock_release(kswap->sw_disklock);
 
+	/* Unset the swap flag in the page table entry */
 	*pg_entry &= ~PG_SWAP;
+
+	/* Mark the page table entry as being valid and dirty */
 	*pg_entry |= PG_VALID;
 	*pg_entry |= PG_DIRTY;
 
 	return 0;
 }
 
+/*
+ * evicting
+ *
+ * Code which the page daemon runs
+ */
 void
-swap_test(void) {
-	struct uio ku;
-	struct iovec iov;
+evicting(void *p, unsigned long arg) {
 
+	(void)p;
+	(void)arg;
+	paddr_t pgvictim;
 	int result;
-	int write[LHD_SECTSIZE];
-	int read[LHD_SECTSIZE];
+	int c_index;
 
-	for (int i=0; i<LHD_SECTSIZE; i++) {
-		write[i] = i;
-	}
+	while(1) {
 
-	uio_kinit(&iov, &ku, write, sizeof(write),
-	0, UIO_WRITE);
-	result = VOP_WRITE(kswap->sw_file, &ku);
-	if (result) {
-		panic("Write failed in swap_test\n");
-	}
+		/* Set kswap->sw_pgevicted as false to indicate the page daemon
+		 * has not yet evicted a page */
+		kswap->sw_pgevicted = false;
 
-	uio_kinit(&iov, &ku, read, sizeof(read),
-	0, UIO_READ);
-	result = VOP_READ(kswap->sw_file, &ku);
-	if (result) {
-		panic("Read failed in swap_test\n");
-	}
+		/* Select a page to evict */
+		sw_getpage(&pgvictim);
 
-	for (int i=0; i<LHD_SECTSIZE; i++) {
-		if (read[i] != write[i]) {
-			panic("Mismatch in swap_test\n");
+		/* Check that the coremap entry corresponding to the page
+		 * selected for eviction has the appropriate values */
+		KASSERT(!spinlock_do_i_hold(&coremap->c_spinlock));
+		c_index = (int)(pgvictim/PAGE_SIZE);
+		KASSERT(coremap->c_entries[c_index].ce_allocated);
+		KASSERT(coremap->c_entries[c_index].ce_foruser);
+		KASSERT(coremap->c_entries[c_index].ce_busy);
+		KASSERT((paddr_t)((*coremap->c_entries[c_index].ce_pgentry &
+		PG_FRAME) << 12) == pgvictim);
+
+		/* Evict the page */
+		result = sw_evictpage(pgvictim);
+		if (result) {
+			spinlock_acquire(&coremap->c_spinlock);
+			coremap->c_entries[c_index].ce_busy = false;
+			spinlock_release(&coremap->c_spinlock);
+			clocksleep(1);
 		}
-	}
-}
 
-bool
-sw_check(int *pg_entry, struct addrspace *as) {
-	unsigned long as_npages1;
-	unsigned long as_npages2;
-	int as_heapsz;
+		/* Mark the coremap entry as being free */
+		spinlock_acquire(&coremap->c_spinlock);
+		coremap->c_entries[c_index].ce_allocated = false;
+		coremap->c_entries[c_index].ce_addrspace = NULL;
 
-	as_npages1 = as->as_npages1;
-	as_npages2 = as->as_npages2;
-	as_heapsz = as->as_heapsz;
+		if (c_index >= coremap->c_userpbase) {
+			coremap->c_entries[c_index].ce_foruser = true;
 
-	for (unsigned long i=0; i<as_npages1; i++) {
-		if (&as->as_pgtable1[i] == pg_entry) {
-			return true;
+		} else {
+			coremap->c_entries[c_index].ce_foruser = false;
 		}
-	}
 
-	for (unsigned long i=0; i<as_npages2; i++) {
-		if (&as->as_pgtable2[i] == pg_entry) {
-			return true;
-		}
-	}
+		coremap->c_entries[c_index].ce_next = 0;
+		coremap->c_entries[c_index].ce_pgentry = NULL;
+		coremap->c_entries[c_index].ce_swapoffset = -1;
+		coremap->c_entries[c_index].ce_busy = false;
+		spinlock_release(&coremap->c_spinlock);
+		kswap->sw_pgevicted = true;
+		clocksleep(1);
 
-	for (int i=0; i<as_heapsz; i++) {
-		if (&as->as_heappgtable[i] == pg_entry) {
-			return true;
-		}
 	}
-
-	for (int i=0; i<STACKSIZE; i++) {
-		if (&as->as_stackpgtable[i] == pg_entry) {
-			return true;
-		}
-	}
-
-	return false;
 
 }
