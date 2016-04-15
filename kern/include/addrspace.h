@@ -38,13 +38,23 @@
 #include <vm.h>
 #include "opt-dumbvm.h"
 
-#define MAX_HEAPSIZE 1378
-#define STACKSIZE 20
+/* Define the maximum number of heap pages allowed per process */
+#define MAX_HEAPPAGES 1260
+
+/* Define the size of the stack page table.  The size of the stack page table
+ * is static so the stack size per process is also limited */
+#define NSTACKPAGES 20
+
+/* Define the minimum size of the heap page table */
 #define MIN_HEAPSZ 4
+
+/* Define the types of address regions supported */
 #define AS_REGION1 0
 #define AS_REGION2 1
 #define AS_HEAP 2
 #define AS_STACK 3
+
+/* Bitmasks for the page table entries */
 #define PG_VALID 0x80000000
 #define PG_FRAME 0x000FFFFF
 #define PG_SWAP 0x40000000
@@ -71,19 +81,43 @@ struct addrspace {
         size_t as_npages2;
         paddr_t as_stackpbase;
 #else
-        /* Put stuff here for your VM system */
+        /* Address space lock */
 	struct lock *as_lock;
+
+	/* Address space cv */
 	struct cv *as_cv;
+
+	/* Pointer to the page table for address region 1 */
         int* as_pgtable1;
+
+	/* Virtual base address of address region 1 */
 	vaddr_t as_vbase1;
+
+	/* Number of pages in address region 1 */
 	unsigned long as_npages1;
+
+	/* Pointer to the page table for address region 2 */
 	int* as_pgtable2;
+
+	/* Virtual base address of address region 2 */
 	vaddr_t as_vbase2;
+
+	/* Number of pages in address region 2 */
 	unsigned long as_npages2;
+
+	/* Pointer to the stack page table */
 	int* as_stackpgtable;
+
+	/* Address stack pointer */
 	vaddr_t as_stackptr;
+
+	/* Pointer to the heap page table */
 	int* as_heappgtable;
+
+	/* End address of the heap region */
 	vaddr_t as_heaptop;
+
+	/* Size of the heap page table */
 	int as_heapsz;
 #endif
 };
@@ -95,6 +129,13 @@ struct addrspace {
  *                sure this gets called in all the right places. You
  *                may find you want to change the argument list. May
  *                return NULL on out-of-memory error.
+ *
+ *    as_growheap - Doubles the size of the heap page table.
+ *
+ *    as_shrinkheap - Reduces the size of the heap page table by half. 
+ *
+ *    as_copyregion - Copies the page table for an address region.  Invokes by
+ *                    as_copy.
  *
  *    as_copy   - create a new address space that is an exact copy of
  *                an old one. Probably calls as_create to get a new
@@ -108,6 +149,9 @@ struct addrspace {
  *                currently "seen" by the processor. This is used to
  *                avoid potentially "seeing" it while it's being
  *                destroyed.
+ *   
+ *    as_destroyregion - destroys the page table of a given address region.
+ *                       Invoked by as_destroy.
  *
  *    as_destroy - dispose of an address space. You may need to change
  *                the way this works if implementing user-level threads.
