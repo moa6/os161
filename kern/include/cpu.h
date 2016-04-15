@@ -170,5 +170,6 @@ void ipi_tlbshootdown(struct cpu *target, const struct tlbshootdown *mapping);
 
 void interprocessor_interrupt(void);
 
+void execute_tlbshootdown(paddr_t paddr);
 
 #endif /* _CPU_H_ */
