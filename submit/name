@@ -25,6 +25,11 @@ badcall and bigexec
 5) Fixed memory leaks, cleaned up the code, and ensured code was properly
 commented
 
+Assignment 6
+
+Designed and implemented the coremap, page table, the synchronization protocols
+to facilitate swapping, and tlbshootdown.
+
 Mohammad's Contributions:
 
 Assignment 4
