@@ -50,13 +50,25 @@
  */
 static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
 
+/*
+ * vm_bootstrap
+ *
+ * Set up the virtual memory system during bootup
+ */
 void
 vm_bootstrap(void)
 {
+	/* Set up the coremap and kernel swap structure in bootup */
 	coremap_bootstrap();
 	sw_bootstrap();
 }
 
+/*
+ * getppages
+ *
+ * Uses the ram_stealmem function to retrieve free physical pages.  Should not
+ * be used once the coremap is set up 
+ */
 static
 paddr_t
 getppages(unsigned long npages)
@@ -72,27 +84,47 @@ getppages(unsigned long npages)
 	return addr;
 }
 
-/* Allocate/free some kernel-space virtual pages */
+/* alloc_kpages
+ *
+ * Used by kmalloc to retrieve free pages
+ */
 vaddr_t
 alloc_kpages(unsigned npages)
 {
 	paddr_t pa;
 
 	if (coremap_ready()) {
+
+		/* If the coremap is ready, we get kernel pages by looking up
+		 * the coremap */
+
 		pa = coremap_getkpages(npages);
 
 	} else {
+
+		/* If the coremap is not ready, we can use getppages to get new
+		 * kernel pages */
+
 		pa = getppages(npages);
 
 	}
 
 	if (pa == 0) {
+
+		/* If pa equals 0, we were unable to get new kernel pages.  So
+		 * we return 0 */
 		return 0;
 	}
 
+	/* Return the virtual address */
 	return PADDR_TO_KVADDR(pa);
 }
 
+/*
+ * free_kpages
+ *
+ * Called by kfree to free kernel pages
+ */
 void
 free_kpages(vaddr_t addr)
 {
@@ -105,9 +137,14 @@ free_kpages(vaddr_t addr)
 void
 vm_tlbshootdown_all(void)
 {
-	panic("vm tried to do tlb shootdown?!\n");
+	panic("vm_tlbshootdown_all not used\n");
 }
 
+/*
+ * vm_tlbshootdown
+ *
+ * Shoots down entries in the TLB
+ */
 void
 vm_tlbshootdown(const struct tlbshootdown *ts)
 {
@@ -120,8 +157,12 @@ vm_tlbshootdown(const struct tlbshootdown *ts)
 	spl = splhigh();
 
 	for (i=0; i<NUM_TLB; i++) {
+
+		/* Read a TLB entry */
 		tlb_read(&ehi, &elo, i);
+
 		if ((elo & TLBLO_PPAGE) == paddr) {
+			/* If the TLB low entry contains paddr, invalidate it */
 			tlb_write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
 		}
 
@@ -129,17 +170,23 @@ vm_tlbshootdown(const struct tlbshootdown *ts)
 
 	splx(spl);
 
+	/* Increment the kswap tlbshootdown semaphore to indicate that the
+	 * tlbshootdown is complete */
+	V(kswap->sw_tlbshootdown_sem);
 
 }
 
+/*
+ * vm_fault
+ *
+ * Handles virtual memory faults
+ */
 int
 vm_fault(int faulttype, vaddr_t faultaddress)
 {
 	int tlb_index;
 	int *pgtable;
 	int result;
-//	unsigned lru_index;
-	int c_index;
 	signed long index;
 	unsigned long npages;
 	vaddr_t vbase1, vtop1, vbase2, vtop2, stacktop, heaptop, stacklimit;
@@ -148,10 +195,12 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	struct addrspace *as;
 	int spl;
 
+	/* Align the fault address to 4K boundaries */
 	faultaddress &= PAGE_FRAME;
 
 	DEBUG(DB_VM, "vm: fault: 0x%x\n", faultaddress);
 
+	/* Check that the faulttype is valid.  If not, return EINVAL. */
 	if (faulttype != VM_FAULT_READONLY && faulttype != VM_FAULT_READ &&
 		faulttype != VM_FAULT_WRITE) {
 		return EINVAL;
@@ -175,13 +224,19 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 		return EFAULT;
 	}
 
+	/* Determine the base address and top address of each address region.
+	 * Note that the top address of address region 2 is the same as the base
+	 * address for the heap. */
 	vbase1 = as->as_vbase1;
 	vtop1 = vbase1 + as->as_npages1 * PAGE_SIZE;
 	vbase2 = as->as_vbase2;
 	vtop2 = vbase2 + as->as_npages2 * PAGE_SIZE;
 	stacktop = USERSTACK;
-	stacklimit = USERSTACK - STACKSIZE * PAGE_SIZE;
+	stacklimit = USERSTACK - NSTACKPAGES * PAGE_SIZE;
 	heaptop = as->as_heaptop;
+
+	/* Determine which address region the faultaddress lies and which page
+	 * table entry we should be accessing. */
 
 	if (faultaddress >= vbase1 && faultaddress < vtop1) {
 		index = (signed long)((faultaddress - vbase1) / PAGE_SIZE);
@@ -199,6 +254,8 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 		index = (signed long)(((stacktop - faultaddress) / PAGE_SIZE) -
 		1);
+
+		/* Adjust the stackptr if necessary */
 
 		if (stacktop - (index+1)*PAGE_SIZE < as->as_stackptr) {
 			as->as_stackptr = stacktop - (index+1)*PAGE_SIZE;
@@ -221,23 +278,38 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 		goto fetchpaddr;
 		
 	} else {
+	
+		/* If faultaddress does not lie in any of the address regions,
+		 * return EFAULT */
+
 		return EFAULT;
 	}		
 	
 fetchpaddr:
+
+	/* Now that we know which address region faultaddress belongs to, look
+	 * up the matching page table entry */
 	
 	if (index >= (signed long)npages) {
+
 		return EFAULT;
 
 	} 
 	
+	/* Acquire the address space lock */
 	lock_acquire(as->as_lock);
 
+	/* If the page table entry is marked as busy, the physical page is being
+	 * evicted.  Wait until the page table entry is not busy before
+	 * proceeding. */
 	while (pgtable[index] & PG_BUSY) {
 		cv_wait(as->as_cv, as->as_lock);
 	}
 
 	if (pgtable[index] & PG_VALID) {
+
+		/* If the page table entry is marked as valid, get the physical
+		 * address */
 
 		if (faulttype == VM_FAULT_READONLY && !(pgtable[index] & PG_DIRTY)) {
 			pgtable[index] |= PG_DIRTY;
@@ -246,6 +318,10 @@ fetchpaddr:
 		paddr = (paddr_t)((pgtable[index] & PG_FRAME) << 12);
 
 	} else if (pgtable[index] & PG_SWAP) { 
+
+		/* If the page has been swapped out, mark the page table entry
+		 * as busy, release the address space lock, and perform a page
+		 * in */
 
 		pgtable[index] |= PG_BUSY;
 		
@@ -258,11 +334,19 @@ fetchpaddr:
 			return result;
 		}
 
+		/* Acquire the address space lock again */
 		lock_acquire(as->as_lock);
 
+		/* Get the physical address from the page table entry */
 		paddr = (paddr_t)((pgtable[index] & PG_FRAME) << 12);
 		
 	} else if (pgtable[index] == 0) {
+
+		/* If the page table entry is 0, then we need to request a new
+		 * physical page.  We first mark the page table entry as being valid,
+		 * dirty, and busy. We then release the address space lock and
+		 * call coremap_getpage to get a new page.*/
+
 		pgtable[index] = PG_VALID | PG_DIRTY | PG_BUSY;
 
 		lock_release(as->as_lock);
@@ -273,85 +357,79 @@ fetchpaddr:
 			return result;
 		}
 
+		/* Re-acquire the address space lock */
 		lock_acquire(as->as_lock);
 		
+		/* Get the physical address from the page table entry and zero
+		 * any data in the new page */
 		paddr = (paddr_t)((pgtable[index] & PG_FRAME) << 12);
-		c_index = (int)(paddr/PAGE_SIZE);
-		KASSERT(sw_check(coremap->c_entries[c_index].ce_pgentry,
-		coremap->c_entries[c_index].ce_addrspace));
 		bzero((void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE);
 
 	} else {
 		panic("vm_fault should not get to here!\n");
 	}
 	
-	/* make sure it's page-aligned */
+	/* make sure the physical address is page-aligned */
 	KASSERT((paddr & PAGE_FRAME) == paddr);
 
 	/* Disable interrupts on this CPU while frobbing the TLB. */
 	spl = splhigh();
 
+	/* Randomly select a place in the TLB to add a new TLB entry */
 	tlb_index = random() % NUM_TLB;
 	ehi = faultaddress;
-/*
-	if (faulttype == VM_FAULT_READONLY) {
-		ts = kmalloc(sizeof(const struct tlbshootdown));
-		if (ts == NULL) {
-			return ENOMEM;
-		}
 
-		ts->ts_paddr = paddr;
-		vm_tlbshootdown(ts);
-		kfree(ts);
-		elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
-
-	} else {
-		elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
-	}
-*/
-
+	/* In our implementation, TLB entries are always marked as dirty */
 	elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
 
 	DEBUG(DB_VM, "vm: 0x%x -> 0x%x\n", faultaddress, paddr);
+
+	/* Add a new TLB entry */
 	tlb_write(ehi, elo, tlb_index);
+
 	splx(spl);
 
-/*
-	lru_index = (unsigned)(paddr/PAGE_SIZE);
-
-	spinlock_acquire(&kswap->sw_lruclk->l_spinlock);
-	if (!bitmap_isset(kswap->sw_lruclk->l_clkface, lru_index)) {
-		bitmap_mark(kswap->sw_lruclk->l_clkface, lru_index);
-	} 
-	spinlock_release(&kswap->sw_lruclk->l_spinlock);	
-*/
-
 	if (pgtable[index] & PG_BUSY) {
+
+		/* If the page table entry was marked as busy, mark it as no
+		 * longer being busy */
 		pgtable[index] &= ~PG_BUSY;
 	}
 
+	/* Release the address space lock */
 	lock_release(as->as_lock);
+
 	return 0;
 }
 
+/*
+ * as_create
+ *
+ * Creates and initializes the new address space
+ */
 struct addrspace *
 as_create(void)
 {
+	/* Create a new address space */
 	struct addrspace *as = kmalloc(sizeof(struct addrspace));
 	if (as==NULL) {
 		return NULL;
 	}
 
+	/* Create the address space lock */
 	as->as_lock = lock_create("as lock");
 	if (as->as_lock == NULL) {
 		return NULL;
 	}
 
+	/* Create the address space conditional variable */
 	as->as_cv = cv_create("as cv");
 	if (as->as_cv == NULL) {
 		return NULL;
 	}
 
+	/* Initialize the rest of the address space fields.  Except for the
+	 * stackptr, all of the fields are either NULL or 0 */
 	as->as_pgtable1 = NULL;
 	as->as_vbase1 = 0;
 	as->as_npages1 = 0;
@@ -364,9 +442,15 @@ as_create(void)
 	as->as_heaptop = 0;
 	as->as_heapsz = MIN_HEAPSZ;
 
+	/* Return the new address space */ 
 	return as;
 }
 
+/*
+ * as_destroyregion
+ *
+ * Destroys the page table for a given address region
+ */
 void
 as_destroyregion(struct addrspace *as, int as_regiontype)
 {
@@ -376,6 +460,8 @@ as_destroyregion(struct addrspace *as, int as_regiontype)
 	int npages;
 	int c_index;
 	unsigned sw_offset;
+
+	/* Select the page table to destroy based on as_regiontype */
 
 	switch (as_regiontype) {
 		case AS_REGION1:
@@ -389,65 +475,102 @@ as_destroyregion(struct addrspace *as, int as_regiontype)
 		case AS_HEAP:
 			pgtable = as->as_heappgtable;
 			npages = (int)(as->as_heapsz);
-
-			if (pgtable == NULL) {
-				return;
-			}
-
 			break;
 		case AS_STACK:
 			pgtable = as->as_stackpgtable;
-			npages = STACKSIZE;
+			npages = NSTACKPAGES;
 			break;
 		default:
 			panic("Address region unsupported\n");
 	}
 
+	if (pgtable == NULL) {
+
+		/* If there is no page table, do nothing */
+		
+		return;
+	}
+
 	for (int i=0; i<npages; i++) {
 
+		/* Go through the page table entries and either free pages or
+		 * free the page contents in the swap file */
+
 		if (pgtable[i] == 0) {
+
+			/* If the page table entry is zero, examine the next
+			 * page table entry */
+
 			continue;
 
 		} else {
 
+			/* Acquire the address space lock */
 			lock_acquire(as->as_lock);
 
+			/* Wait until the page table entry is no longer marked
+			 * as busy */
 			while (pgtable[i] & PG_BUSY) {
 				cv_wait(as->as_cv, as->as_lock);
 			}
 
+			/* Mark the page table entry as being busy */
 			pgtable[i] |= PG_BUSY;
 
+			/* Release the address space lock */
 			lock_release(as->as_lock);
 
+			/* Acquire the coremap spinlock */
 			spinlock_acquire(&coremap->c_spinlock);
 
 			if (pgtable[i] & PG_VALID) {
+
+				/* If the page table entry is valid, we must
+				 * free the user page */
 				
 				c_index = (int)(((pgtable[i] & PG_FRAME) << 12)
 				/ PAGE_SIZE);
 
+				/* There is a possibility that a page daemon or
+				 * some other process is attempting to evict the
+				 * page.  We must wait until that is no longer
+				 * the case. Once we acquire the spinlock and
+				 * the coremap entry is no longer marked as
+				 * busy, nothing can swap out the page. */
 				while (coremap->c_entries[c_index].ce_busy) {
 					spinlock_release(&coremap->c_spinlock);
 					thread_yield();
 					spinlock_acquire(&coremap->c_spinlock);
 				}
 
+				/* Check that we have the right coremap entry */
 				KASSERT((paddr_t)((*coremap->c_entries[c_index].ce_pgentry
 				& PG_FRAME) << 12) ==
 				(paddr_t)(c_index*PAGE_SIZE));
 
+				/* Check that the page table entry is no longer
+				 * marked as busy */
 				KASSERT(!coremap->c_entries[c_index].ce_busy);
+
+				/* Free the physical page */
 				coremap->c_entries[c_index].ce_addrspace = NULL;
 				coremap->c_entries[c_index].ce_allocated =
 				false;
-				coremap->c_entries[c_index].ce_foruser = false;
+				coremap->c_entries[c_index].ce_foruser = true;
 				coremap->c_entries[c_index].ce_next = 0;
 				coremap->c_entries[c_index].ce_pgentry = NULL;
 				coremap->c_entries[c_index].ce_swapoffset = -1;
 
+				/* Release the coremap spinlock */
+				spinlock_release(&coremap->c_spinlock);
+
 			} else if (pgtable[i] & PG_SWAP) {
-				
+			
+				/* If the page table entry is marked as swap, we
+				 * simply mark the offset location in the swap
+				 * file as free */
+
+				spinlock_release(&coremap->c_spinlock);	
 				sw_offset = (unsigned)(pgtable[i] & PG_FRAME);
 				lock_acquire(kswap->sw_disklock);
 				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
@@ -457,217 +580,39 @@ as_destroyregion(struct addrspace *as, int as_regiontype)
 				panic("as_destroy should not get to here\n");
 			}
 
-			spinlock_release(&coremap->c_spinlock);
-
 		}
 
 	}
-/*		
-		spinlock_acquire(&coremap->c_spinlock);
-		if (pgtable[i] & PG_VALID) {
-			c_index = ((pgtable[i] & PG_FRAME) << 12) / PAGE_SIZE;
-
-			if (!coremap->c_entries[c_index].ce_busy) {
-				coremap->c_entries[c_index].ce_addrspace = NULL;
-				coremap->c_entries[c_index].ce_allocated = false;
-				coremap->c_entries[c_index].ce_foruser = false;
-				coremap->c_entries[c_index].ce_busy = false;
-				coremap->c_entries[c_index].ce_next = 0;
-				coremap->c_entries[c_index].ce_pgentry = NULL;
-				coremap->c_entries[c_index].ce_swapoffset = -1;
-			}
-
-			spinlock_release(&coremap->c_spinlock);
-
-		} else if (pgtable[i] & PG_SWAP) {
-			spinlock_release(&coremap->c_spinlock);
-			sw_offset = (unsigned)(pgtable[i] & PG_FRAME);
-			lock_acquire(kswap->sw_disklock);
-			bitmap_unmark(kswap->sw_diskoffset, sw_offset);
-			lock_release(kswap->sw_disklock);
-
-		} else {
-			KASSERT(pgtable[i] == 0);
-			spinlock_release(&coremap->c_spinlock);
-		}
-				
-	}
-
-	kfree(pgtable);
-*/
 }
-
+/*
+ * as_destroy
+ *
+ * Destroys the address space
+ */
 void
 as_destroy(struct addrspace *as) {
 	
+	/*Destroy the page tables for all address regions */
 	as_destroyregion(as, AS_REGION1);
 	as_destroyregion(as, AS_REGION2);
 	as_destroyregion(as, AS_HEAP);
 	as_destroyregion(as, AS_STACK);
 	
+	/* Destroy the address space lock */
 	lock_destroy(as->as_lock);
+	
+	/* Destroy the address space cv */
 	cv_destroy(as->as_cv);
+
+	/* Free the address space */
 	kfree(as);
-
-
-/*
-	paddr_t pframe;
-	unsigned sw_offset;
-
-	if (as->as_pgtable1 != NULL) {
-
-		for (unsigned long i=0; i<as->as_npages1; i++) {
-
-			lock_acquire(as->as_lock);
-
-			while (as->as_pgtable1[i] & PG_BUSY) {
-				cv_wait(as->as_cv, as->as_lock);
-			}
-
-			as->as_pgtable1[i] |= PG_BUSY;
-			
-			lock_release(as->as_lock);
-
-			if (as->as_pgtable1[i] & PG_VALID) {
-				pframe = (paddr_t)(as->as_pgtable1[i] << 12);
-				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
-				coremap_freepage(pframe);
-							
-			} else if (as->as_pgtable1[i] & PG_SWAP) {
-
-				sw_offset = (unsigned)(as->as_pgtable1[i] &
-				PG_FRAME);
-				lock_acquire(kswap->sw_disklock);
-				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
-				lock_release(kswap->sw_disklock);					
-
-			} else {
-				KASSERT(as->as_pgtable1[i] & PG_BUSY);
-
-			}
-
-		}
-
-		kfree(as->as_pgtable1);
-	}
-
-	if (as->as_pgtable2 != NULL) {
-
-		for (unsigned long i=0; i<as->as_npages2; i++) {
-
-			lock_acquire(as->as_lock);
-
-			while (as->as_pgtable2[i] & PG_BUSY) {
-				cv_wait(as->as_cv, as->as_lock);
-			}
-
-			as->as_pgtable2[i] |= PG_BUSY;
-			
-			lock_release(as->as_lock);
-
-			if (as->as_pgtable2[i] & PG_VALID) {
-				pframe = (paddr_t)(as->as_pgtable2[i] << 12);
-				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
-				coremap_freepage(pframe);
-							
-			} else if (as->as_pgtable2[i] & PG_SWAP) {
-
-				sw_offset = (unsigned)(as->as_pgtable2[i] &
-				PG_FRAME);
-				lock_acquire(kswap->sw_disklock);
-				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
-				lock_release(kswap->sw_disklock);					
-
-			} else {
-				KASSERT(as->as_pgtable2[i] & PG_BUSY);
-
-			}
-
-		}
-
-		kfree(as->as_pgtable2);
-	}
-
-	if (as->as_heappgtable != NULL) {
-
-		for (int i=0; i<as->as_heapsz; i++) {
-
-			lock_acquire(as->as_lock);
-
-			while (as->as_heappgtable[i] & PG_BUSY) {
-				cv_wait(as->as_cv, as->as_lock);
-			}
-
-			as->as_heappgtable[i] |= PG_BUSY;
-			
-			lock_release(as->as_lock);
-
-			if (as->as_heappgtable[i] & PG_VALID) {
-				pframe = (paddr_t)(as->as_heappgtable[i] << 12);
-				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
-				coremap_freepage(pframe);
-							
-			} else if (as->as_heappgtable[i] & PG_SWAP) {
-
-				sw_offset = (unsigned)(as->as_heappgtable[i] &
-				PG_FRAME);
-				lock_acquire(kswap->sw_disklock);
-				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
-				lock_release(kswap->sw_disklock);					
-
-			} else {
-				KASSERT(as->as_heappgtable[i] & PG_BUSY);
-
-			}
-
-		}
-
-		kfree(as->as_heappgtable);
-	}
-
-	if (as->as_stackpgtable != NULL) {
-
-		for (int i=0; i<STACKSIZE; i++) {
-
-			lock_acquire(as->as_lock);
-
-			while (as->as_stackpgtable[i] & PG_BUSY) {
-				cv_wait(as->as_cv, as->as_lock);
-			}
-
-			as->as_stackpgtable[i] |= PG_BUSY;
-			
-			lock_release(as->as_lock);
-
-			if (as->as_stackpgtable[i] & PG_VALID) {
-				pframe = (paddr_t)(as->as_stackpgtable[i] << 12);
-				bzero((void *)PADDR_TO_KVADDR(pframe), PAGE_SIZE);
-				coremap_freepage(pframe);
-							
-			} else if (as->as_stackpgtable[i] & PG_SWAP) {
-
-				sw_offset = (unsigned)(as->as_stackpgtable[i] &
-				PG_FRAME);
-				lock_acquire(kswap->sw_disklock);
-				bitmap_unmark(kswap->sw_diskoffset, sw_offset);
-				lock_release(kswap->sw_disklock);					
-
-			} else {
-				KASSERT(as->as_stackpgtable[i] & PG_BUSY);
-
-			}
-
-		}
-
-		kfree(as->as_stackpgtable);
-	}
-
-	lock_destroy(as->as_lock);
-	cv_destroy(as->as_cv);
-	kfree(as);
-*/
 }
 
+/*
+ * as_activate
+ *
+ * Activates the address space
+ */
 void
 as_activate(void)
 {
@@ -683,6 +628,9 @@ as_activate(void)
 	spl = splhigh();
 
 	for (i=0; i<NUM_TLB; i++) {
+
+		/* Invalidate the TLB entry */
+
 		tlb_write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
 	}
 
@@ -695,7 +643,11 @@ as_deactivate(void)
 	/* nothing */
 }
 
-
+/*
+ * as_define_region
+ *
+ * Defines the address region
+ */
 int
 as_define_region(struct addrspace *as, vaddr_t vaddr, size_t sz,
 		 int readable, int writeable, int executable)
@@ -717,12 +669,18 @@ as_define_region(struct addrspace *as, vaddr_t vaddr, size_t sz,
 	(void)executable;
 
 	if (as->as_vbase1 == 0) {
+
+		/* If address region 1 has not yet been defined, define it */
+
 		as->as_vbase1 = vaddr;
 		as->as_npages1 = npages;
 		return 0;
 	} 
 	
 	if (as->as_vbase2 == 0) {
+
+		/* If address region 2 has not yet been defined, define it */
+
 		as->as_vbase2 = vaddr;
 		as->as_npages2 = npages;
 		as->as_heaptop = as->as_vbase2 + as->as_npages2 * PAGE_SIZE;
@@ -732,43 +690,50 @@ as_define_region(struct addrspace *as, vaddr_t vaddr, size_t sz,
 	panic("vm does not support more than two regions!\n");
 }
 
+/*
+ * as_prepare_load
+ *
+ * Called before actually loading from an executable into the address space
+ */
 int
 as_prepare_load(struct addrspace *as)
 {
 
+	/* Create the page table for address region 1 */
 	as->as_pgtable1 = kmalloc(as->as_npages1 * sizeof(int));
 	if (as->as_pgtable1 == NULL) {
 		as_destroy(as);
 		return ENOMEM;
 	}
 
+	/* Initialize the page table entries for the address region 1 page table
+	 */
 	for (unsigned long i=0; i<as->as_npages1; i++) {
 		as->as_pgtable1[i] = 0;
 	}
 
+	/* Create the page table for address region 2 */
 	as->as_pgtable2 = kmalloc(as->as_npages2 * sizeof(int));
 	if (as->as_pgtable2 == NULL) {
 		as_destroy(as);
 		return ENOMEM;
 	}
 
+	/* Initialize the page table entries for the address region 2 page table
+	 */
 	for (unsigned long i=0; i<as->as_npages2; i++) {
 		as->as_pgtable2[i] = 0;
 	}
-
-	as->as_stackpgtable = kmalloc(STACKSIZE * sizeof(int));
-	if (as->as_stackpgtable == NULL) {
-		as_destroy(as);
-		return ENOMEM;
-	}
-
-	for (unsigned long i=0; i<STACKSIZE; i++) {
-		as->as_stackpgtable[i] = 0;
-	}
-		
+	
 	return 0;	
 }
 
+/*
+ * as_complete_load
+ *
+ * Called when loading from an executable is complete.  In our implementation,
+ * it does nothing.
+ */
 int
 as_complete_load(struct addrspace *as)
 {
@@ -776,13 +741,36 @@ as_complete_load(struct addrspace *as)
 	return 0;
 }
 
+/*
+ * as_define_stack
+ *
+ * Defines the stack region in the address space
+ */
 int
 as_define_stack(struct addrspace *as, vaddr_t *stackptr)
 {
 	*stackptr = as->as_stackptr;
+
+	/* Create the stack page table */
+	as->as_stackpgtable = kmalloc(NSTACKPAGES * sizeof(int));
+	if (as->as_stackpgtable == NULL) {
+		as_destroy(as);
+		return ENOMEM;
+	}
+
+	/* Initialize the page table entries in the stack page table */
+	for (unsigned long i=0; i<NSTACKPAGES; i++) {
+		as->as_stackpgtable[i] = 0;
+	}
+
 	return 0;
 }
 
+/*
+ * as_growheap
+ *
+ * Doubles the size of the heap region
+ */
 int
 as_growheap(struct addrspace *as) {
 
@@ -790,25 +778,45 @@ as_growheap(struct addrspace *as) {
 	int c_index;
 	paddr_t paddr;
 
+	/* Create heap_temp which is double the size of the current heap page
+	 * table */
 	heap_temp = kmalloc(2*as->as_heapsz*sizeof(int));
 	if (heap_temp == NULL) {
 		return ENOMEM;
 	}
 
+	/* Initialize the page table entries in heap_temp */
 	for (int i=0; i<2*as->as_heapsz; i++) {
 		heap_temp[i] = 0;
 	}
 
+	/* Copy the current heap page table over to heap_temp */ 
+
 	for (int i=0; i<as->as_heapsz; i++) {
 
+		/* Acquire the address space lock */
 		lock_acquire(as->as_lock);
+
+		/* Wait until the page table entry is no longer marked as busy
+		 */
 		while (as->as_heappgtable[i] & PG_BUSY) {
 			cv_wait(as->as_cv, as->as_lock);
 		}
+
+		/* Mark the page table entry as being busy */
 		as->as_heappgtable[i] |= PG_BUSY;
+
+		/* Release the address space lock */
 		lock_release(as->as_lock);
 		
 		if (as->as_heappgtable[i] & PG_VALID) {
+
+			/* If the page table entry is marked as valid, copy the
+			 * page table entry contents from the current heap page
+			 * table to heap_temp.  Also, make sure
+			 * that ce_pgentry of the corresponding coremap entry is
+			 * pointing to the page table entry in heap_temp */
+
 			paddr = (paddr_t)((as->as_heappgtable[i]
 			& PG_FRAME) << 12);
 			c_index = (int)(paddr/PAGE_SIZE);
@@ -824,6 +832,11 @@ as_growheap(struct addrspace *as) {
 			spinlock_release(&coremap->c_spinlock);
 				
 		} else if (as->as_heappgtable[i] & PG_SWAP) {
+
+			/* If the page table entry is marked as swap, just copy
+			 * the page table entry contents from the current heap
+			 * page table to heap_temp */
+
 			memcpy(&heap_temp[i],
 			&as->as_heappgtable[i], sizeof(int));
 
@@ -831,7 +844,15 @@ as_growheap(struct addrspace *as) {
 			KASSERT(as->as_heappgtable[i] == PG_BUSY);
 		}
 
+		/* Because we marked the page table entry of the original heap
+		 * page table as being busy and copied the entry contents over
+		 * to heap_temp, we must now mark the page table entry in
+		 * heap_temp as no longer busy */
 		heap_temp[i] &= ~PG_BUSY;
+
+		/* We acquire the address space lock, mark the page table entry
+		 * in the original heap page table as no longer being busy, and
+		 * release the address space lock */
 
 		lock_acquire(as->as_lock);
 		as->as_heappgtable[i] &= ~PG_BUSY;
@@ -840,12 +861,24 @@ as_growheap(struct addrspace *as) {
 
 	}
 
+	/* Free the original heap page table */
 	kfree(as->as_heappgtable);
+	
+	/* Set heap_temp as the new heap page table */
 	as->as_heappgtable = heap_temp;
+
+	/* Indicate that the size of the heap page table is now doubled */
 	as->as_heapsz *= 2;
+
 	return 0;
 }
 
+/*
+ * as_shrinkheap
+ *
+ * Decreases the size of the heap page table by half.  Works similarly to
+ * as_growheap.
+ */
 int
 as_shrinkheap(struct addrspace *as) {
 
@@ -913,6 +946,11 @@ as_shrinkheap(struct addrspace *as) {
 	return 0;
 }
 
+/*
+ * as_copyregion
+ *
+ * Copies the page table of a given address region
+ */
 int
 as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 	
@@ -926,6 +964,8 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 	struct uio ku;
 	struct iovec iov;
 
+	/* Determine which page table needs to be copied and create a new page
+	 * table in the new address space */
 	switch (as_regiontype) {
 		case AS_REGION1:
 			old_pgtable = old->as_pgtable1;
@@ -954,6 +994,10 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 			old_npages = (int)(old->as_heapsz);
 
 			if (old_pgtable == NULL) {
+
+				/* If there is no heap page table in the old
+				 * address space, then we simply return 0 */
+
 				return 0;
 			}
 
@@ -966,7 +1010,7 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 			break;
 		case AS_STACK:
 			old_pgtable = old->as_stackpgtable;
-			old_npages = STACKSIZE;
+			old_npages = NSTACKPAGES;
 
 			new->as_stackpgtable = kmalloc(old_npages * sizeof(int));
 			if (new->as_stackpgtable == NULL) {
@@ -979,25 +1023,43 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 			panic("Address region unsupported\n");
 	}
 
+	/* Initialize the page table in the new address space */
 	for (int i=0; i<old_npages; i++) {
 		new_pgtable[i] = 0;
 	}
 
+
+	/* Go through each page table entry in the old address space */
 	for (int i=0; i<old_npages; i++) {
+
+		/* Acquire the old address space lock */
 		lock_acquire(old->as_lock);
+
+		/* Wait until the old page table entry is no longer marked as busy
+		 */
 		while (old_pgtable[i] & PG_BUSY) {
 			cv_wait(old->as_cv, old->as_lock);
 		}
-		old_pgtable[i] |= PG_BUSY;
-		lock_release(old->as_lock);
 
+		/* Mark the old page table entry as busy */
+		old_pgtable[i] |= PG_BUSY;
+
+		/* Release the old address space lock */
+		lock_release(old->as_lock);
 
 		if (old_pgtable[i] & PG_VALID) {
 
+			/* If the old page table entry is marked as valid, get a
+			 * new page for the new page table entry */
+
 			old_paddr = (paddr_t)((old_pgtable[i] & PG_FRAME) << 12);
 
+			/* Mark the new page table entry as being valid, busy,
+			 * and dirty.  We mark the new page table entry as being
+			 * busy so that the new page does not get evicted too soon. */
 			new_pgtable[i] = PG_VALID | PG_BUSY | PG_DIRTY;
 
+			/* Get a new page for the new page table entry */
 			result = coremap_getpage(&new_pgtable[i], new);
 			if (result) {
 				lock_acquire(old->as_lock);
@@ -1010,17 +1072,29 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 
 			new_paddr = (paddr_t)((new_pgtable[i] & PG_FRAME) << 12);
 
+			/* Copy the contents of the old page into the new page
+			 */
 			memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void
 			*)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 			
+			/* Acquire the new address space lock, mark the new page
+			 * table entry as not busy, and release the new address
+			 * space lock */
 			lock_acquire(new->as_lock);
 			new_pgtable[i] &= ~PG_BUSY;
 			lock_release(new->as_lock);
 			
 		} else if (old_pgtable[i] & PG_SWAP) {
 
+			/* If the old page table entry is marked as swap, the
+			 * contents are in the swap file */
+
+			/* Mark the new page table entry as being valid, busy,
+			 * and dirty.  We mark the new page table entry as being
+			 * busy so the new page does not get evicted too soon */
 			new_pgtable[i] = PG_VALID | PG_BUSY | PG_DIRTY;
 
+			/* Get a new page for the new page table entry */
 			result = coremap_getpage(&new_pgtable[i], new);
 			if (result) {
 				lock_acquire(old->as_lock);
@@ -1031,13 +1105,20 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 				return result;
 			}
 
+			/* Get the address of the new physical page */
 			new_paddr = (paddr_t)((new_pgtable[i] & PG_FRAME) << 12);
 
+			/* Get the offset location of the page data stored in
+			 * the swap file.  This information is contained in the
+			 * old page table entry. */
 			sw_offset = (off_t)((old_pgtable[i] & PG_FRAME) *
 			PAGE_SIZE);
+
+			/* Read the contents of the data from the swap file to
+			 * the new physical page */
 			uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(new_paddr), PAGE_SIZE,
 			sw_offset, UIO_READ);
-			result = VOP_READ(kswap->sw_file, &ku);
+			result = kswap->sw_vn->vn_ops->vop_read(kswap->sw_vn, &ku);
 			if (result) {
 				lock_acquire(old->as_lock);
 				old_pgtable[i] &= ~PG_BUSY;
@@ -1047,6 +1128,7 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 				return result;
 			}
 
+			/* Mark the new page table entry as not busy */
 			lock_acquire(new->as_lock);
 			new_pgtable[i] &= ~PG_BUSY;
 			lock_release(new->as_lock);
@@ -1055,7 +1137,7 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 			KASSERT(old_pgtable[i] == PG_BUSY);
 		}
 
-
+		/* Mark the old page table entry as not being busy */ 
 		lock_acquire(old->as_lock);
 		old_pgtable[i] &= ~PG_BUSY;
 		lock_release(old->as_lock);
@@ -1065,17 +1147,25 @@ as_copyregion(struct addrspace *old, struct addrspace *new, int as_regiontype) {
 	return 0;
 }
 
+/*
+ * as_copy
+ *
+ * Copies the contents of an address space into a new one
+ */
 int
 as_copy(struct addrspace *old, struct addrspace **ret)
 {
 	int result;
 	struct addrspace *new;
 
+	/* Create a new address space */
 	new = as_create();
 	if (new == NULL) {
 		return ENOMEM;
 	}
 
+	/* Copy the fields in the old address space over to the new address
+	 * space */
 	new->as_vbase1 = old->as_vbase1;
 	new->as_npages1 = old->as_npages1;
 	new->as_vbase2 = old->as_vbase2;
@@ -1083,6 +1173,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	new->as_stackptr = old->as_stackptr;
 	new->as_heaptop = old->as_heaptop;
 	new->as_heapsz = old->as_heapsz;
+
+	/* Use as_copyregion to copy the page table of each region to the new
+	 * address space */
 
 	result = as_copyregion(old, new, AS_REGION1);
 	if (result) {
