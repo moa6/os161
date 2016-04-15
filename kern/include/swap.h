@@ -33,27 +33,43 @@
 #include <types.h>
 #include <lib.h>
 
-#define SWAP_SIZE 1250
+/* Define the size of the swap file */
+#define SWAPFILE_SIZE 1250
 
-struct lru_clk {
-	struct lock *l_lock;
-	struct bitmap *l_clkface;
-	unsigned long l_npages;
-};
-
+/*
+ * swap struct
+ */
 struct swap {
+	/* tlbshootdown structure */
 	struct tlbshootdown *sw_ts;
-	paddr_t sw_pgvictim;
-	bool sw_pgavail;
-	struct lock *sw_pglock;
+
+	/* Semaphore used to communicate when tlbshootdown is complete */
+	struct semaphore *sw_tlbshootdown_sem;
+
+	/* Lock which protects sw_ts */
+	struct lock *sw_tlbshootdown_lock;
+
+	/* Lock which ensures that offset locations in the swap file are updated
+	 * atomically */
 	struct lock *sw_disklock;
-	struct cv *sw_cv;
-	struct vnode *sw_file;
+
+	/* Swap file vnode */
+	struct vnode *sw_vn;
+
+	/* bitmap which tracks the offset locations in the swap file */
 	struct bitmap *sw_diskoffset;
-	struct lru_clk *sw_lruclk;
+
+	/* Flag to indicate if the disk is full */
+	bool sw_diskfull;
+
+	/* Flag to indicate if the page daemon thread has evicted the page */
+	bool sw_pgevicted;
 };
 
+/* The kernel swap stucture */
 extern struct swap *kswap;
+
+/* Declarations of swap functions */
 
 void sw_bootstrap(void);
 
@@ -63,7 +79,6 @@ int sw_evictpage(paddr_t paddr);
 
 int sw_pagein(int *pg_entry, struct addrspace *as);
 
-void swap_test(void);
+void evicting (void *p, unsigned long arg);
 
-bool sw_check(int *pg_entry, struct addrspace *as);
 #endif
