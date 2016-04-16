@@ -813,8 +813,12 @@ sys_sbrk(intptr_t amount, void *retval)  {
 
 				/* Mark the page table entry as being busy */
 				lock_acquire(as->as_lock);
-				cv_wait(as->as_cv, as->as_lock);
 				int index = (int)((h_ptr - hbase)/PAGE_SIZE);
+
+				while (as->as_heappgtable[index] & PG_BUSY) {
+					cv_wait(as->as_cv, as->as_lock);
+				}
+
 				as->as_heappgtable[index] |= PG_BUSY;
 				lock_release(as->as_lock);
 
